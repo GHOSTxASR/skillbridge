@@ -1,0 +1,6 @@
+﻿# OTP verification is handled by Supabase Auth.
+# The user manually enters the 6-digit code received by email.
+# After successful verification, redirect to profile setup.
+
+# No database profile is created during signup.
+# Profile is created only after setup-profile is completed.
