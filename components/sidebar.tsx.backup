@@ -1,0 +1,151 @@
+﻿"use client"
+
+import Link from "next/link"
+import { usePathname, useRouter } from "next/navigation"
+import { useEffect, useState } from "react"
+import {
+  LayoutDashboard,
+  ClipboardList,
+  GitCompareArrows,
+  Route,
+  Briefcase,
+  Target,
+  ShieldCheck,
+  LogOut,
+  User,
+} from "lucide-react"
+import { cn } from "@/lib/utils"
+import { supabase } from "@/lib/supabase-browser"
+
+const navItems = [
+  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/assessment", label: "Skill Assessment", icon: ClipboardList },
+  { href: "/gap-analysis", label: "Skill Gap Analysis", icon: GitCompareArrows },
+  { href: "/roadmap", label: "Learning Roadmap", icon: Route },
+  { href: "/jobs", label: "Jobs", icon: Briefcase },
+  { href: "/readiness", label: "Job Readiness", icon: Target },
+]
+
+export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
+  const pathname = usePathname()
+  const router = useRouter()
+  const [userName, setUserName] = useState("User")
+
+  useEffect(() => {
+    async function loadProfile() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+
+      if (!user) return
+
+      const { data } = await supabase
+        .from("profiles")
+        .select("name")
+        .eq("id", user.id)
+        .single()
+
+      if (data?.name) {
+        setUserName(data.name)
+      }
+    }
+
+    loadProfile()
+  }, [])
+
+  async function handleLogout() {
+    await supabase.auth.signOut()
+    onNavigate?.()
+    router.replace("/login")
+    router.refresh()
+  }
+
+  return (
+    <aside className="flex h-full w-64 flex-col bg-sidebar text-sidebar-foreground">
+
+      <div className="flex h-16 items-center gap-2.5 border-b border-sidebar-border px-6">
+        <div className="flex size-9 items-center justify-center rounded-md bg-sidebar-primary text-sidebar-primary-foreground">
+          <ShieldCheck className="size-5" />
+        </div>
+
+        <div className="leading-tight">
+          <p className="text-sm font-semibold text-sidebar-primary">
+            SkillBridge
+          </p>
+          <p className="text-[11px] text-sidebar-foreground/70">
+            Skill-to-Job Intelligence
+          </p>
+        </div>
+      </div>
+
+      <nav className="flex-1 space-y-1 px-3 py-4">
+        {navItems.map((item) => {
+          const active =
+            item.href === "/"
+              ? pathname === "/"
+              : pathname.startsWith(item.href)
+
+          const Icon = item.icon
+
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={onNavigate}
+              className={cn(
+                "flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors",
+                active
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+              )}
+            >
+              <Icon className="size-4.5 shrink-0" />
+              {item.label}
+            </Link>
+          )
+        })}
+      </nav>
+
+      <div className="border-t border-sidebar-border p-4 space-y-3">
+
+        <div className="rounded-md bg-sidebar-accent/50 p-3">
+          <div className="flex items-center gap-2.5">
+            <div className="flex size-8 items-center justify-center rounded-full bg-sidebar-primary/15 text-sidebar-primary">
+              <User className="size-4" />
+            </div>
+
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-sidebar-primary">
+                {userName}
+              </p>
+
+              <p className="text-[11px] text-sidebar-foreground/70">
+                Account information
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleLogout}
+          className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+        >
+          <LogOut className="size-4 shrink-0" />
+          Logout
+        </button>
+
+        <div className="rounded-md bg-sidebar-accent/50 p-3">
+          <p className="text-xs font-medium text-sidebar-primary">
+            SIH Prototype
+          </p>
+
+          <p className="mt-1 text-[11px] leading-relaxed text-sidebar-foreground/70">
+            AI-powered career intelligence for India&apos;s workforce.
+          </p>
+        </div>
+
+      </div>
+    </aside>
+  )
+}

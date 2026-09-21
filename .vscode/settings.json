@@ -1,0 +1,9 @@
+{
+    "VsCodeTaskButtons.tasks": [
+        {
+            "label": "$(cloud-upload) UPLOAD TO GITHUB",
+            "task": "Upload to GitHub",
+            "tooltip": "Upload project to GitHub"
+        }
+    ]
+}

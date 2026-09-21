@@ -1,0 +1,220 @@
+﻿"use client"
+
+import { useEffect, useState } from "react"
+import {
+  User,
+  BriefcaseBusiness,
+  Pencil,
+  LogOut,
+  Mail,
+  MapPin,
+  Target,
+} from "lucide-react"
+import { supabase } from "@/lib/supabase-browser"
+import { EditProfile } from "@/components/account/edit-profile"
+
+type Profile = {
+  name?: string | null
+  target_role?: string | null
+  experience?: string | null
+  location?: string | null
+}
+
+export default function AccountPage() {
+  const [profile, setProfile] = useState<Profile>({})
+  const [email, setEmail] = useState("")
+  const [loading, setLoading] = useState(true)
+  const [editing, setEditing] = useState(false)
+
+  useEffect(() => {
+    async function loadAccount() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+
+      if (!user) {
+        setLoading(false)
+        return
+      }
+
+      setEmail(user.email ?? "")
+
+      const { data } = await supabase
+        .from("profiles")
+        .select("name,target_role,experience,location")
+        .eq("id", user.id)
+        .single()
+
+      if (data) {
+        setProfile(data)
+      }
+
+      setLoading(false)
+    }
+
+    loadAccount()
+  }, [])
+
+  async function logout() {
+    await supabase.auth.signOut()
+    window.location.href = "/login"
+  }
+
+  const name = profile.name || "User"
+
+  const initials = name
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase()
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[400px] items-center justify-center">
+        <p className="text-sm text-muted-foreground">
+          Loading account information...
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Account Information
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Manage your personal and career information.
+        </p>
+      </div>
+
+      {/* Personal Information */}
+      <section className="rounded-xl border bg-card p-6 shadow-sm">
+
+        <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+
+          <div className="flex items-center gap-4">
+            <div className="flex size-16 items-center justify-center rounded-full bg-primary/10 text-lg font-semibold text-primary">
+              {initials}
+            </div>
+
+            <div>
+              <h2 className="text-lg font-semibold">{name}</h2>
+              <p className="text-sm text-muted-foreground">
+                SkillBridge Member
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="inline-flex items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium hover:bg-muted"
+          >
+            <Pencil className="size-4" />
+            Edit Profile
+          </button>
+
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+
+          <div className="rounded-lg border p-4">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <User className="size-4" />
+              <p className="text-xs">Full Name</p>
+            </div>
+            <p className="mt-2 font-medium">{name}</p>
+          </div>
+
+          <div className="rounded-lg border p-4">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Mail className="size-4" />
+              <p className="text-xs">Email Address</p>
+            </div>
+            <p className="mt-2 font-medium">
+              {email || "Not available"}
+            </p>
+          </div>
+
+        </div>
+      </section>
+
+      {/* Career Information */}
+      <section className="rounded-xl border bg-card p-6 shadow-sm">
+
+        <div className="mb-5 flex items-center gap-2">
+          <BriefcaseBusiness className="size-5 text-primary" />
+          <h2 className="font-semibold">Career Information</h2>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+
+          <div className="rounded-lg border p-4">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Target className="size-4" />
+              <p className="text-xs">Target Role</p>
+            </div>
+            <p className="mt-2 font-medium">
+              {profile.target_role || "Not set"}
+            </p>
+          </div>
+
+          <div className="rounded-lg border p-4">
+            <p className="text-xs text-muted-foreground">
+              Experience
+            </p>
+            <p className="mt-2 font-medium">
+              {profile.experience || "Not set"}
+            </p>
+          </div>
+
+          <div className="rounded-lg border p-4">
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <MapPin className="size-4" />
+              <p className="text-xs">Location</p>
+            </div>
+            <p className="mt-2 font-medium">
+              {profile.location || "Not set"}
+            </p>
+          </div>
+
+        </div>
+      </section>
+
+      {/* Account */}
+      <section className="rounded-xl border bg-card p-6 shadow-sm">
+
+        <div className="mb-5">
+          <h2 className="font-semibold">Account</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Manage your SkillBridge account session.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={logout}
+          className="inline-flex items-center justify-center gap-2 rounded-md border border-destructive/30 px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
+        >
+          <LogOut className="size-4" />
+          Logout
+        </button>
+
+      </section>
+
+      {editing && (
+        <EditProfile
+          profile={profile}
+          onClose={() => setEditing(false)}
+          onSaved={(updatedProfile) => setProfile(updatedProfile)}
+        />
+      )}
+
+    </div>
+  )
+}

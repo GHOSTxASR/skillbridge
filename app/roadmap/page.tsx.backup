@@ -1,0 +1,327 @@
+﻿"use client"
+
+import { useEffect, useMemo, useState } from "react"
+import {
+  BookOpen,
+  ExternalLink,
+  Code2,
+  Loader2,
+  PlayCircle,
+} from "lucide-react"
+
+import { supabase } from "@/lib/supabase-browser"
+import { Card, CardContent } from "@/components/card"
+import { PageHeader } from "@/components/page-header"
+import { StatusBadge } from "@/components/status-badge"
+import { SkillBadge } from "@/components/skill-badge"
+import { ProgressBar } from "@/components/progress-bar"
+
+type Resource = {
+  id: string
+  title: string
+  description: string
+  type: "video" | "github" | "documentation"
+  url: string
+  source: string
+  skill: string
+  free: boolean
+}
+
+type LearningResponse = {
+  targetRole: string
+  skills: string[]
+  resources: Resource[]
+  sources: {
+    github: boolean
+    youtube: boolean
+    documentation: boolean
+  }
+  generatedAt: string
+}
+
+function ResourceIcon({ type }: { type: Resource["type"] }) {
+  if (type === "github") {
+    return <Code2 className="size-4" />
+  }
+
+  if (type === "video") {
+    return <PlayCircle className="size-4" />
+  }
+
+  return <BookOpen className="size-4" />
+}
+
+export default function RoadmapPage() {
+  const [data, setData] = useState<LearningResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    async function loadLearning() {
+      try {
+        setLoading(true)
+        setError("")
+
+        const {
+          data: { user },
+        } = await supabase.auth.getUser()
+
+        if (!user) {
+          setError("Please login again.")
+          return
+        }
+
+        const response = await fetch("/api/learning", {
+          cache: "no-store",
+        })
+
+        const result = await response.json()
+
+        if (!response.ok) {
+          throw new Error(result.error || "Unable to load learning resources")
+        }
+
+        setData(result)
+      } catch (err) {
+        console.error("Learning page error:", err)
+        setError("Unable to load your personalized learning roadmap.")
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    loadLearning()
+  }, [])
+
+  const resourcesBySkill = useMemo(() => {
+    if (!data) return {}
+
+    return data.skills.reduce<Record<string, Resource[]>>((groups, skill) => {
+      groups[skill] = data.resources.filter(
+        (resource) => resource.skill.toLowerCase() === skill.toLowerCase()
+      )
+      return groups
+    }, {})
+  }, [data])
+
+  const totalResources = data?.resources.length ?? 0
+
+  const skillProgress =
+    data?.skills.length
+      ? Math.round(
+          (data.skills.filter(
+            (skill) =>
+              data.resources.some(
+                (resource) =>
+                  resource.skill.toLowerCase() === skill.toLowerCase()
+              )
+          ).length /
+            data.skills.length) *
+            100
+        )
+      : 0
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-5 animate-spin text-primary" />
+          Building your personalized learning roadmap...
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div>
+        <PageHeader
+          title="Learning Roadmap"
+          description="Your personalized learning path."
+        />
+
+        <Card>
+          <CardContent className="p-8 text-center">
+            <p className="text-sm font-medium text-foreground">{error}</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Refresh the page and try again.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <PageHeader
+        title="Learning Roadmap"
+        description={`A personalized learning path for ${data?.targetRole ?? "your target role"}.`}
+        action={
+          <StatusBadge tone="primary">
+            {data?.skills.length ?? 0} skills
+          </StatusBadge>
+        }
+      />
+
+      {/* Overview */}
+      <Card className="mb-6">
+        <CardContent className="p-5">
+          <ProgressBar
+            value={skillProgress}
+            tone="primary"
+            label="Learning coverage"
+            showLabel
+          />
+
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-md bg-accent p-3">
+              <p className="text-xs text-muted-foreground">Target Role</p>
+              <p className="mt-1 text-sm font-semibold text-foreground">
+                {data?.targetRole}
+              </p>
+            </div>
+
+            <div className="rounded-md bg-accent p-3">
+              <p className="text-xs text-muted-foreground">Skills</p>
+              <p className="mt-1 text-sm font-semibold text-foreground">
+                {data?.skills.length ?? 0}
+              </p>
+            </div>
+
+            <div className="rounded-md bg-accent p-3">
+              <p className="text-xs text-muted-foreground">Resources</p>
+              <p className="mt-1 text-sm font-semibold text-foreground">
+                {totalResources}
+              </p>
+            </div>
+
+            <div className="rounded-md bg-accent p-3">
+              <p className="text-xs text-muted-foreground">Sources</p>
+              <p className="mt-1 text-sm font-semibold text-foreground">
+                {[
+                  data?.sources.github,
+                  data?.sources.youtube,
+                  data?.sources.documentation,
+                ].filter(Boolean).length}
+              </p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Skills */}
+      <div className="mb-8">
+        <h2 className="mb-3 text-base font-semibold text-foreground">
+          Skills for your target role
+        </h2>
+
+        <div className="flex flex-wrap gap-2">
+          {data?.skills.map((skill) => (
+            <SkillBadge key={skill} name={skill} />
+          ))}
+        </div>
+      </div>
+
+      {/* Learning resources */}
+      <div>
+        <h2 className="mb-3 text-base font-semibold text-foreground">
+          Recommended Learning Resources
+        </h2>
+
+        <div className="space-y-6">
+          {data?.skills.map((skill) => {
+            const resources = resourcesBySkill[skill] ?? []
+
+            return (
+              <section key={skill}>
+                <div className="mb-3 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-semibold text-foreground">
+                      {skill}
+                    </h3>
+                    <p className="text-xs text-muted-foreground">
+                      {resources.length} learning resources
+                    </p>
+                  </div>
+
+                  <StatusBadge tone="neutral">
+                    {resources.length} resources
+                  </StatusBadge>
+                </div>
+
+                {resources.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+                    {resources.slice(0, 6).map((resource) => (
+                      <Card
+                        key={resource.id}
+                        className="flex flex-col p-5 transition-shadow hover:shadow-md"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-accent text-primary">
+                            <ResourceIcon type={resource.type} />
+                          </span>
+
+                          <StatusBadge tone="neutral">
+                            {resource.type === "github"
+                              ? "Open Source"
+                              : resource.type === "video"
+                                ? "Video"
+                                : "Docs"}
+                          </StatusBadge>
+                        </div>
+
+                        <h4 className="mt-3 line-clamp-2 text-sm font-semibold leading-snug text-foreground">
+                          {resource.title}
+                        </h4>
+
+                        <p className="mt-2 line-clamp-3 text-xs text-muted-foreground">
+                          {resource.description || "Free learning resource."}
+                        </p>
+
+                        <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
+                          <span>{resource.source}</span>
+
+                          {resource.free && (
+                            <span className="rounded bg-secondary px-1.5 py-0.5 font-medium text-secondary-foreground">
+                              Free
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="mt-4 border-t border-border pt-3">
+                          <a
+                            href={resource.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex w-full items-center justify-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+                          >
+                            Open Resource
+                            <ExternalLink className="size-3.5" />
+                          </a>
+                        </div>
+                      </Card>
+                    ))}
+                  </div>
+                ) : (
+                  <Card>
+                    <CardContent className="p-5">
+                      <p className="text-xs text-muted-foreground">
+                        No resources found for this skill yet.
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+              </section>
+            )
+          })}
+        </div>
+      </div>
+
+      <p className="mt-8 text-center text-xs text-muted-foreground">
+        Resources are fetched dynamically from public learning sources.
+        Source freshness may vary by provider.
+      </p>
+    </div>
+  )
+}

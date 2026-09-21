@@ -6,8 +6,30 @@ __v0_jsx-dev-runtime.ts
 .v0-trash/
 .vercel/
 
-# Environment variables
+# Environment variables: real values live only in .env.local / the Vercel dashboard.
+.env
+.env.*
 .env*.local
+!.env.example
+
+# Credentials and archives (project zips have carried live .env files)
+*.pem
+*.key
+*.zip
+
+# Stale full-copy backups of old app versions. Kept on disk (not deleted) pending review,
+# but not part of the canonical source: nothing imports them and they contain a demo password.
+skillbridge-before-final-upgrade/
+app.before-full-restore/
+components.before-full-restore/
+
+# Supabase CLI local state
+supabase/.temp/
+supabase/.branches/
+
+# TypeScript / Next.js generated files
+*.tsbuildinfo
+next-env.d.ts
 
 # Common ignores
 node_modules

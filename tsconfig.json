@@ -29,5 +29,10 @@
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "skillbridge-before-final-upgrade",
+    "app.before-full-restore",
+    "components.before-full-restore"
+  ]
 }
