@@ -68,6 +68,61 @@ function skills(value: unknown): string[] {
     })
 }
 
+// body.profile is untrusted client input (app/gap-analysis sends the assessment's
+// role/skills/experience). Only these fields are taken, type-checked and bounded;
+// a field with the wrong type is ignored so the database value is kept.
+const SUPPLIED_TEXT_LIMITS = {
+  target_role: 150,
+  experience_level: 100,
+  education: 300,
+  bio: 1000,
+} as const
+
+const MAX_SUPPLIED_SKILLS = 30
+const MAX_SKILL_LENGTH = 80
+
+type SuppliedProfile = {
+  -readonly [K in keyof typeof SUPPLIED_TEXT_LIMITS]?: string
+} & { skills?: string[] }
+
+function sanitizeSuppliedProfile(value: unknown): SuppliedProfile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+
+  const input = value as Record<string, unknown>
+  const profile: SuppliedProfile = {}
+
+  for (const field of Object.keys(SUPPLIED_TEXT_LIMITS) as Array<keyof typeof SUPPLIED_TEXT_LIMITS>) {
+    const raw = input[field]
+    if (typeof raw === "string") {
+      profile[field] = raw.trim().slice(0, SUPPLIED_TEXT_LIMITS[field])
+    }
+  }
+
+  if (Array.isArray(input.skills)) {
+    const seen = new Set<string>()
+    const accepted: string[] = []
+
+    for (const item of input.skills) {
+      if (accepted.length === MAX_SUPPLIED_SKILLS) break
+      if (typeof item !== "string") continue
+
+      const skill = item.trim()
+      // Over-long entries are dropped rather than cut, since a partial name is not a skill.
+      if (!skill || skill.length > MAX_SKILL_LENGTH) continue
+
+      const key = skill.toLowerCase()
+      if (seen.has(key)) continue
+
+      seen.add(key)
+      accepted.push(skill)
+    }
+
+    profile.skills = accepted
+  }
+
+  return profile
+}
+
 function fallback(profile: any): SkillAnalysis {
   const targetRole =
     typeof profile?.target_role === "string" &&
@@ -260,7 +315,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}))
 
-    const suppliedProfile = body?.profile
+    const suppliedProfile = sanitizeSuppliedProfile(body?.profile)
 
     const supabase = await createSupabaseServerClient()
 
@@ -278,14 +333,14 @@ export async function POST(request: Request) {
     const { data: dbProfile } = await supabase
       .from("profiles")
       .select(
-        "target_role, skills, experience_level, education, bio"
+        "target_role, skills, experience_level, education"
       )
       .eq("id", user.id)
       .maybeSingle()
 
     const profile = {
       ...(dbProfile ?? {}),
-      ...(suppliedProfile ?? {}),
+      ...suppliedProfile,
     }
 
     const targetRole =

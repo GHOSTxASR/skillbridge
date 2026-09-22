@@ -7,6 +7,9 @@ import { createSupabaseServerClient } from "@/lib/supabase-server"
 
 export const dynamic = "force-dynamic"
 
+// Far above anything typed into the chat inputs; bounds what is sent to Groq.
+const MAX_MESSAGE_LENGTH = 4000
+
 type AnalysisInput = {
   role?: string
   skills?: string[]
@@ -97,6 +100,21 @@ export async function POST(
 
     const body =
       (await request.json().catch(() => ({}))) as AnalysisInput
+
+    if (
+      typeof body.message === "string" &&
+      body.message.trim().length > MAX_MESSAGE_LENGTH
+    ) {
+      return NextResponse.json(
+        {
+          ok: false,
+          ai: false,
+          reply: `Your message is too long. Please keep it under ${MAX_MESSAGE_LENGTH} characters.`,
+          error: "Message too long",
+        },
+        { status: 400 }
+      )
+    }
 
     const { data: profile } =
       await supabase
