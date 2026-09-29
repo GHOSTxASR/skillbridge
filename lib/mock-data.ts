@@ -14,12 +14,6 @@ export type Skill = {
   category: string
 }
 
-export type Role = {
-  id: string
-  title: string
-  demand: "High" | "Medium" | "Low"
-}
-
 export type Course = {
   id: string
   title: string
@@ -62,18 +56,6 @@ export type RoadmapPhase = {
   skills: string[]
   courses: string[]
 }
-
-export const targetRoles: Role[] = [
-  { id: "backend", title: "", demand: "High" },
-  { id: "frontend", title: "Frontend Developer", demand: "High" },
-  { id: "fullstack", title: "Full Stack Developer", demand: "High" },
-  { id: "data-analyst", title: "Data Analyst", demand: "Medium" },
-  { id: "data-scientist", title: "Data Scientist", demand: "High" },
-  { id: "devops", title: "DevOps Engineer", demand: "Medium" },
-  { id: "security", title: "Cybersecurity Engineer", demand: "Medium" },
-]
-
-export const experienceLevels = ["Beginner", "Intermediate", "Advanced"] as const
 
 export const allSkills = [
   "C++",

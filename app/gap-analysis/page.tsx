@@ -1,32 +1,38 @@
 "use client"
 
 import Link from "next/link"
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import {
-  CheckCircle2,
-  Clock,
-  AlertTriangle,
   ArrowRight,
-  Target,
-  BrainCircuit,
-  BookOpen,
+  ChevronDown,
+  ClipboardCheck,
   Code2,
+  RefreshCw,
+  Route,
+  Sparkles,
 } from "lucide-react"
 
 import { supabase } from "@/lib/supabase-browser"
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/card"
-import { PageHeader } from "@/components/page-header"
-import { MetricCard } from "@/components/metric-card"
-import { StatusBadge } from "@/components/status-badge"
-import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import {
+  LEVEL_META,
+  countByLevel,
+  requiredSkills,
+  type RequiredSkill,
+  type SkillLevel,
+} from "@/lib/skill-status"
+import { buttonVariants } from "@/components/ui/button"
+import { ReadinessGauge } from "@/components/ui/gauge"
+import { Eyebrow, PageHeader, Section } from "@/components/ui/page"
+import { ErrorState, LoadingState, Notice, Skeleton } from "@/components/ui/states"
+import { StatusBadge } from "@/components/status-badge"
 
 type SkillGap = {
   skill: string
   category?: string
   currentLevel?: number
   requiredLevel?: number
-  status?: "mastered" | "in-progress" | "gap"
+  status?: string
   priority?: "high" | "medium" | "low"
   reason?: string
 }
@@ -60,219 +66,231 @@ type Analysis = {
     explanation?: string
   }
   aiAvailable?: boolean
+  reason?: string
+  cached?: boolean
+  generatedAt?: string
 }
 
-function SkillRow({ skill }: { skill: SkillGap }) {
-  const current = Math.max(0, Math.min(100, skill.currentLevel ?? 0))
-  const required = Math.max(0, Math.min(100, skill.requiredLevel ?? 80))
-  const deficit = Math.max(0, required - current)
+const COLUMN_ORDER: SkillLevel[] = ["strong", "developing", "missing"]
 
-  const status =
-    skill.status ??
-    (current >= required
-      ? "mastered"
-      : current >= required - 20
-        ? "in-progress"
-        : "gap")
+const COLUMN_TEXT: Record<SkillLevel, string> = {
+  strong: "Already solid for this role",
+  developing: "Some foundation; worth strengthening",
+  missing: "Not in your profile yet",
+}
 
-  const barColor =
-    status === "mastered"
-      ? "bg-success"
-      : status === "in-progress"
-        ? "bg-primary"
-        : "bg-warning"
+// The share of skills at each level, as one bar. Widths come straight from the counts.
+function CompositionBar({ counts }: { counts: Record<SkillLevel, number> }) {
+  const total = counts.strong + counts.developing + counts.missing
+  const [drawn, setDrawn] = useState(false)
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setDrawn(true))
+    return () => cancelAnimationFrame(frame)
+  }, [])
+
+  if (total === 0) return null
 
   return (
-    <div className="py-4">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-foreground">
-            {skill.skill}
-          </span>
+    <div>
+      <div
+        className="flex h-3 w-full gap-1 overflow-hidden rounded-full"
+        role="img"
+        aria-label={`${counts.strong} strong, ${counts.developing} developing and ${counts.missing} missing skills`}
+      >
+        {COLUMN_ORDER.map((level) =>
+          counts[level] > 0 ? (
+            <div
+              key={level}
+              className={cn("h-full rounded-full", LEVEL_META[level].bar)}
+              style={{
+                width: drawn ? `${(counts[level] / total) * 100}%` : "0%",
+                transition: "width 900ms var(--ease-out)",
+              }}
+            />
+          ) : null
+        )}
+      </div>
+      <dl className="mt-4 flex flex-wrap gap-x-8 gap-y-3">
+        {COLUMN_ORDER.map((level) => (
+          <div key={level} className="flex items-baseline gap-2">
+            <span className={cn("size-2 self-center rounded-full", LEVEL_META[level].dot)} aria-hidden="true" />
+            <dt className="text-sm text-muted-foreground">{LEVEL_META[level].label}</dt>
+            <dd className="type-metric text-lg text-foreground">{counts[level]}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  )
+}
 
-          {skill.category && (
-            <span className="text-xs text-muted-foreground">
-              {skill.category}
-            </span>
+function SkillItem({ entry }: { entry: RequiredSkill }) {
+  const detail = entry.reason || entry.priority
+
+  if (!detail) {
+    return (
+      <li className="flex items-center gap-3 py-3">
+        <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_META[entry.level].dot)} aria-hidden="true" />
+        <span className="text-sm text-foreground">{entry.skill}</span>
+      </li>
+    )
+  }
+
+  return (
+    <li>
+      <details className="group py-1">
+        <summary className="flex cursor-pointer list-none items-center gap-3 rounded-lg py-2 marker:hidden [&::-webkit-details-marker]:hidden">
+          <span className={cn("size-1.5 shrink-0 rounded-full", LEVEL_META[entry.level].dot)} aria-hidden="true" />
+          <span className="min-w-0 flex-1 text-sm text-foreground">{entry.skill}</span>
+          {entry.priority === "high" && entry.level !== "strong" && (
+            <StatusBadge tone="danger">High</StatusBadge>
+          )}
+          <ChevronDown className="size-4 shrink-0 text-subtle-foreground transition-transform duration-200 group-open:rotate-180" />
+        </summary>
+        <div className="pb-3 pl-[18px] pr-6">
+          {entry.priority && (
+            <p className="type-eyebrow text-subtle-foreground">{entry.priority} priority</p>
+          )}
+          {entry.reason && (
+            <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{entry.reason}</p>
           )}
         </div>
+      </details>
+    </li>
+  )
+}
 
-        <div className="flex items-center gap-3 text-xs tabular-nums">
-          <span className="text-muted-foreground">
-            You{" "}
-            <span className="font-semibold text-foreground">
-              {current}%
-            </span>
-          </span>
-
-          <span className="text-muted-foreground">
-            Target{" "}
-            <span className="font-semibold text-foreground">
-              {required}%
-            </span>
-          </span>
+function AnalysisSkeleton() {
+  return (
+    <div className="mt-2 space-y-12">
+      <div className="grid grid-cols-1 gap-10 lg:grid-cols-[auto_1fr] lg:items-center">
+        <Skeleton className="size-44 rounded-full" />
+        <div className="space-y-3">
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className="h-4 w-11/12" />
+          <Skeleton className="h-4 w-2/3" />
+          <Skeleton className="mt-6 h-3 w-full rounded-full" />
         </div>
       </div>
-
-      <div className="relative h-2.5 w-full overflow-hidden rounded-full bg-secondary">
-        <div
-          className="absolute inset-y-0 left-0 rounded-full bg-border"
-          style={{ width: `${required}%` }}
-        />
-
-        <div
-          className={cn(
-            "absolute inset-y-0 left-0 rounded-full",
-            barColor
-          )}
-          style={{ width: `${current}%` }}
-        />
+      <div className="grid grid-cols-1 gap-8 md:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="space-y-3">
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </div>
+        ))}
       </div>
-
-      {deficit > 0 && (
-        <div className="mt-2 flex items-center justify-between">
-          <p className="text-xs text-warning">
-            {deficit}% below target
-          </p>
-
-          {skill.priority && (
-            <StatusBadge
-              tone={
-                skill.priority === "high"
-                  ? "warning"
-                  : skill.priority === "medium"
-                    ? "primary"
-                    : "neutral"
-              }
-            >
-              {skill.priority} priority
-            </StatusBadge>
-          )}
-        </div>
-      )}
-
-      {skill.reason && (
-        <p className="mt-2 text-xs leading-5 text-muted-foreground">
-          {skill.reason}
-        </p>
-      )}
     </div>
   )
 }
 
 export default function GapAnalysisPage() {
   const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState("")
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
+  const [limitNotice, setLimitNotice] = useState("")
 
-  useEffect(() => {
-    async function loadAnalysis() {
-      try {
-        setLoading(true)
-        setError("")
+  // A normal visit uses the saved analysis when it still matches the profile; only the
+  // explicit "Refresh analysis" button asks the server for a new one (?refresh=1).
+  const loadAnalysis = useCallback(async (refresh: boolean) => {
+    try {
+      // A refresh keeps the current analysis on screen while the new one is prepared.
+      if (refresh) setRefreshing(true)
+      else setLoading(true)
+      setError("")
+      setLimitNotice("")
 
-        const {
-          data: { user },
-        } = await supabase.auth.getUser()
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
 
-        if (!user) {
-          window.location.href = "/login"
+      if (!user) {
+        window.location.href = "/login"
+        return
+      }
+
+      // The server analyzes the saved profile (the canonical career target, which the
+      // assessment saves into), so nothing about the profile is sent from here.
+      const response = await fetch(refresh ? "/api/ai/career-analysis?refresh=1" : "/api/ai/career-analysis", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        cache: "no-store",
+        body: JSON.stringify({}),
+      })
+
+      const result = await response.json()
+
+      // Over the per-user AI limit. A refused refresh keeps the analysis on screen (the
+      // Refresh button only shows with one); a first load has nothing else to show.
+      if (response.status === 429) {
+        const message =
+          typeof result?.message === "string"
+            ? result.message
+            : "You've reached the AI request limit. Please try again later."
+
+        if (refresh) {
+          setLimitNotice(message)
           return
         }
 
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("*")
-          .eq("id", user.id)
-          .single()
+        throw new Error(message)
+      }
 
-        const savedAssessment = localStorage.getItem(
-          `skillbridge-assessment-result-${user.id}`
-        )
+      if (!response.ok) {
+        throw new Error(result?.error || "Unable to generate AI skill gap analysis")
+      }
 
-        let assessment: any = {}
+      const aiResult: Analysis = result
 
-        if (savedAssessment) {
-          try {
-            assessment = JSON.parse(savedAssessment)
-          } catch {
-            assessment = {}
-          }
-        }
+      setAnalysis(aiResult)
 
-        const mergedProfile = {
-          ...(profile ?? {}),
-          target_role:
-            assessment.role ||
-            profile?.target_role ||
-            "",
-          skills:
-            Array.isArray(assessment.skills) && assessment.skills.length > 0
-              ? assessment.skills
-              : Array.isArray(profile?.skills)
-                ? profile.skills
-                : [],
-          experience_level:
-            assessment.experience ||
-            profile?.experience_level ||
-            "",
-        }
-
-        const response = await fetch("/api/ai/career-analysis", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          cache: "no-store",
-          body: JSON.stringify({
-            profile: mergedProfile,
-          }),
-        })
-
-        const result = await response.json()
-
-        if (!response.ok) {
-          throw new Error(
-            result?.error || "Unable to generate AI skill gap analysis"
-          )
-        }
-
-        const aiResult: Analysis = result
-
-        setAnalysis(aiResult)
-
+      // Only a genuine AI analysis is kept for the dashboard; an estimate shown while
+      // AI is unavailable never replaces the last real one.
+      if (aiResult.aiAvailable === true) {
         localStorage.setItem(
           `skillbridge-ai-analysis-${user.id}`,
           JSON.stringify({
             ...aiResult,
-            savedAt: new Date().toISOString(),
+            savedAt: aiResult.generatedAt ?? new Date().toISOString(),
           })
         )
-      } catch (err) {
-        console.error("AI skill gap analysis error:", err)
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Unable to generate your AI skill gap analysis."
-        )
-      } finally {
-        setLoading(false)
       }
+    } catch (err) {
+      console.error("AI skill gap analysis error:", err)
+      setError(err instanceof Error ? err.message : "Unable to generate your AI skill gap analysis.")
+    } finally {
+      setLoading(false)
+      setRefreshing(false)
     }
-
-    loadAnalysis()
   }, [])
+
+  useEffect(() => {
+    loadAnalysis(false)
+  }, [loadAnalysis])
+
+  const header = (extra?: Partial<React.ComponentProps<typeof PageHeader>>) => (
+    <PageHeader
+      eyebrow={<Eyebrow tone="primary">Step 2 · Understand</Eyebrow>}
+      title="Skill gap analysis"
+      description="How your skills compare with what your target role needs, and what to focus on first."
+      {...extra}
+    />
+  )
 
   if (loading) {
     return (
-      <div className="flex min-h-[500px] flex-col items-center justify-center gap-3">
-        <BrainCircuit className="size-8 animate-pulse text-primary" />
-        <p className="text-sm font-medium text-foreground">
-          Groq AI is analyzing your career profile...
-        </p>
-        <p className="text-xs text-muted-foreground">
-          Comparing your current skills with your target role.
-        </p>
+      <div>
+        {header()}
+        <LoadingState
+          title="Analyzing your skill profile…"
+          description="Comparing your saved skills with your target role's requirements."
+        >
+          <AnalysisSkeleton />
+        </LoadingState>
       </div>
     )
   }
@@ -280,459 +298,269 @@ export default function GapAnalysisPage() {
   if (error || !analysis) {
     return (
       <div>
-        <PageHeader
-          title="Skill Gap Analysis"
-          description="AI-powered analysis of your current skills and career target."
+        {header()}
+        <ErrorState
+          title="Your analysis couldn't be generated"
+          description={error || "Complete your assessment, then try again."}
+          onRetry={() => loadAnalysis(false)}
+          action={
+            <Link href="/assessment" className={buttonVariants({ variant: "ghost", size: "sm" })}>
+              <ClipboardCheck />
+              Review assessment
+            </Link>
+          }
         />
-
-        <Card className="border-warning/30">
-          <CardContent className="p-6">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 size-5 text-warning" />
-
-              <div>
-                <p className="font-semibold text-foreground">
-                  Unable to generate AI analysis
-                </p>
-
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {error || "Please complete your assessment and try again."}
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
       </div>
     )
   }
 
   const targetRole = analysis.targetRole || "your target role"
-  const readiness = Math.max(
-    0,
-    Math.min(100, Math.round(analysis.readiness ?? 0))
-  )
+  const readiness = Math.max(0, Math.min(100, Math.round(analysis.readiness ?? 0)))
 
-  const skillGaps = Array.isArray(analysis.skillGaps)
-    ? analysis.skillGaps
-    : []
+  const skills = requiredSkills(analysis)
+  const counts = countByLevel(skills)
+  const byLevel = (level: SkillLevel) => skills.filter((entry) => entry.level === level)
 
-  const strengths = Array.isArray(analysis.strengths)
-    ? analysis.strengths
-    : []
+  const prioritySkills = Array.isArray(analysis.prioritySkills) ? analysis.prioritySkills : []
+  const roadmap = Array.isArray(analysis.roadmap) ? analysis.roadmap : []
 
-  const missingSkills = Array.isArray(analysis.missingSkills)
-    ? analysis.missingSkills
-    : Array.isArray(analysis.gaps)
-      ? analysis.gaps
-      : []
+  const lookup = new Map(skills.map((entry) => [entry.skill.toLowerCase(), entry]))
 
-  const weakSkills = Array.isArray(analysis.weakSkills)
-    ? analysis.weakSkills
-    : []
-
-  const prioritySkills = Array.isArray(analysis.prioritySkills)
-    ? analysis.prioritySkills
-    : []
-
-  const roadmap = Array.isArray(analysis.roadmap)
-    ? analysis.roadmap
-    : []
-
-  const mastered = skillGaps.filter(
-    (skill) => skill.status === "mastered"
-  )
-
-  const inProgress = skillGaps.filter(
-    (skill) => skill.status === "in-progress"
-  )
-
-  const criticalGaps = skillGaps.filter(
-    (skill) => skill.status === "gap"
-  )
+  const isEstimate = analysis.aiAvailable === false
+  const jobFitScore = typeof analysis.jobFit?.score === "number" ? Math.round(analysis.jobFit.score) : null
 
   return (
-    <div>
-      <PageHeader
-        title="Skill Gap Analysis"
-        description={`Groq AI comparison of your skills against the ${targetRole} career requirements.`}
-        action={
-          <Link
-            href="/roadmap"
-            className={buttonVariants({ size: "sm" })}
-          >
-            View full learning roadmap
-            <ArrowRight className="size-3.5" />
-          </Link>
-        }
-      />
+    <div className={cn("transition-opacity duration-300", refreshing && "opacity-60")} aria-busy={refreshing}>
+      {header({
+        title: (
+          <>
+            Skill gap analysis
+            <span className="block text-muted-foreground">for {targetRole}</span>
+          </>
+        ),
+        meta: (
+          <>
+            {isEstimate ? (
+              <StatusBadge tone="warning">Estimate · AI unavailable</StatusBadge>
+            ) : (
+              <StatusBadge tone="ai" icon={<Sparkles />}>AI analysis</StatusBadge>
+            )}
+            {analysis.aiAvailable === true && analysis.generatedAt && (
+              <span>Analyzed {new Date(analysis.generatedAt).toLocaleString()}</span>
+            )}
+          </>
+        ),
+        actions: (
+          <>
+            <button
+              type="button"
+              onClick={() => loadAnalysis(true)}
+              disabled={refreshing}
+              className={buttonVariants({ variant: "secondary" })}
+            >
+              <RefreshCw className={cn(refreshing && "animate-spin")} />
+              {refreshing ? "Refreshing…" : "Refresh analysis"}
+            </button>
+            <Link href="/roadmap" className={buttonVariants()}>
+              Learning roadmap
+              <ArrowRight />
+            </Link>
+          </>
+        ),
+      })}
 
-      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-4">
-        <MetricCard
-          label="AI Readiness"
-          value={`${readiness}%`}
-          icon={Target}
-          tone="primary"
-          hint="estimated career readiness"
-        />
-
-        <MetricCard
-          label="Mastered Skills"
-          value={mastered.length}
-          icon={CheckCircle2}
-          tone="success"
-          hint="strong enough for target"
-        />
-
-        <MetricCard
-          label="Weak Skills"
-          value={weakSkills.length}
-          icon={Clock}
-          tone="primary"
-          hint="need improvement"
-        />
-
-        <MetricCard
-          label="Critical Gaps"
-          value={criticalGaps.length || missingSkills.length}
-          icon={AlertTriangle}
-          tone="warning"
-          hint="need focused learning"
-        />
+      <div className="space-y-4">
+        {isEstimate && (
+          <Notice tone="warning" title="This is an estimate, not an AI analysis">
+            {analysis.reason === "rate_limited"
+              ? "AI analysis is temporarily unavailable (too many requests right now), so this is an estimate from your saved skills. Try again in a minute."
+              : "AI analysis is temporarily unavailable, so this is an estimate from your saved skills."}
+          </Notice>
+        )}
+        {analysis.aiAvailable === true && analysis.reason && (
+          <Notice tone="info">
+            The analysis could not be refreshed right now, so your last saved analysis is shown.
+          </Notice>
+        )}
+        {limitNotice && (
+          <Notice tone="warning">
+            {limitNotice} Your last analysis is still shown.
+          </Notice>
+        )}
       </div>
 
-      <Card className="mb-6 border-primary/20 bg-accent/40">
-        <CardContent className="flex items-start gap-3 p-5">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <BrainCircuit className="size-5" />
-          </span>
+      <div className="mt-12 space-y-20">
+        {/* ------------------------------------------------------ Position */}
+        <section className="grid grid-cols-1 items-center gap-10 lg:grid-cols-[auto_1fr] lg:gap-16" aria-labelledby="position-title">
+          <h2 id="position-title" className="sr-only">Where you stand</h2>
+          <div className="flex flex-col items-center gap-3">
+            <ReadinessGauge value={readiness} size={200} label="ready" />
+            <p className="max-w-[15rem] text-center text-xs text-subtle-foreground">
+              {isEstimate ? "Estimated from your saved skills" : `AI estimate of your readiness for ${targetRole}`}
+            </p>
+          </div>
 
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="text-sm font-semibold text-foreground">
-                AI Career Analysis
-              </p>
+            <Eyebrow tone={isEstimate ? "muted" : "ai"}>
+              {!isEstimate && <Sparkles className="size-3" />}
+              Where you stand
+            </Eyebrow>
+            <p className="mt-3 max-w-3xl text-lg leading-relaxed text-foreground/90 text-pretty">
+              {analysis.summary || `Your current profile was compared with the requirements for ${targetRole}.`}
+            </p>
 
-              <StatusBadge tone="success">
-                {analysis.aiAvailable === false
-                  ? "Fallback mode"
-                  : "Groq AI"}
-              </StatusBadge>
+            <div className="mt-8 max-w-3xl">
+              <p className="mb-3 text-xs text-subtle-foreground">
+                {skills.length} skills this analysis covers for {targetRole}
+              </p>
+              <CompositionBar counts={counts} />
             </div>
 
-            <p className="mt-1 text-sm leading-6 text-muted-foreground text-pretty">
-              {analysis.summary ||
-                `Your current profile was analyzed against the requirements for ${targetRole}.`}
-            </p>
+            {analysis.jobFit?.explanation && (
+              <p className="mt-8 max-w-3xl border-l-2 border-border-strong pl-4 text-sm leading-relaxed text-muted-foreground">
+                <span className="font-medium text-foreground">
+                  Role fit{jobFitScore !== null && jobFitScore !== readiness ? ` · ${jobFitScore}%` : ""}:{" "}
+                </span>
+                {analysis.jobFit.explanation}
+              </p>
+            )}
           </div>
-        </CardContent>
-      </Card>
+        </section>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        <div className="space-y-6 lg:col-span-2">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between gap-3">
-                <CardTitle>Current Skills vs Required Skills</CardTitle>
-
-                <StatusBadge tone="primary">
-                  {skillGaps.length} analyzed
-                </StatusBadge>
-              </div>
-            </CardHeader>
-
-            <CardContent className="divide-y divide-border py-0">
-              {skillGaps.length === 0 ? (
-                <div className="py-10 text-center text-sm text-muted-foreground">
-                  No detailed skill comparison was returned.
+        {/* ------------------------------------------------------ Skill map */}
+        <Section
+          title="Skill map"
+          description="Every skill in the analysis, by level. Open a skill to see why it matters."
+          divider
+        >
+          <p className="-mt-2 mb-6 text-xs text-subtle-foreground">
+            Levels are categories from the AI analysis, not measured test scores.
+          </p>
+          <div className="grid grid-cols-1 gap-10 md:grid-cols-3 md:gap-8">
+            {COLUMN_ORDER.map((level) => {
+              const entries = byLevel(level)
+              return (
+                <div key={level} className="min-w-0">
+                  <div className="flex items-center gap-2 border-b border-border pb-3">
+                    <span className={cn("size-2 rounded-full", LEVEL_META[level].dot)} aria-hidden="true" />
+                    <h3 className="text-sm font-semibold text-foreground">{LEVEL_META[level].label}</h3>
+                    <span className="ml-auto text-sm tabular-nums text-subtle-foreground">{entries.length}</span>
+                  </div>
+                  <p className="mt-2 text-xs text-subtle-foreground">{COLUMN_TEXT[level]}</p>
+                  {entries.length === 0 ? (
+                    <p className="mt-4 text-sm text-subtle-foreground">None</p>
+                  ) : (
+                    <ul className="mt-2 divide-y divide-border">
+                      {entries.map((entry) => (
+                        <SkillItem key={entry.skill} entry={entry} />
+                      ))}
+                    </ul>
+                  )}
                 </div>
-              ) : (
-                skillGaps.map((skill, index) => (
-                  <SkillRow
-                    key={`${skill.skill}-${index}`}
-                    skill={skill}
-                  />
-                ))
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>What You Need To Learn</CardTitle>
-            </CardHeader>
-
-            <CardContent className="space-y-3">
-              {missingSkills.length === 0 && weakSkills.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No major learning gaps detected by the AI analysis.
-                </p>
-              ) : (
-                <>
-                  {missingSkills.map((skill, index) => (
-                    <div
-                      key={`missing-${skill}-${index}`}
-                      className="flex items-start gap-3 rounded-lg border border-warning/20 bg-warning-muted/40 p-3"
-                    >
-                      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
-
-                      <div>
-                        <p className="text-sm font-semibold text-foreground">
-                          {skill}
-                        </p>
-
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          AI identified this as a missing skill for your target
-                          role.
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-
-                  {weakSkills.map((skill, index) => (
-                    <div
-                      key={`weak-${skill}-${index}`}
-                      className="flex items-start gap-3 rounded-lg border border-primary/20 bg-primary/5 p-3"
-                    >
-                      <Clock className="mt-0.5 size-4 shrink-0 text-primary" />
-
-                      <div>
-                        <p className="text-sm font-semibold text-foreground">
-                          {skill}
-                        </p>
-
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          You have some foundation here, but AI recommends
-                          strengthening it.
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="space-y-6">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between gap-3">
-                <CardTitle>Priority Skills</CardTitle>
-
-                <StatusBadge tone="warning">
-                  {prioritySkills.length}
-                </StatusBadge>
-              </div>
-            </CardHeader>
-
-            <CardContent className="space-y-3">
-              {prioritySkills.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No priority skills returned.
-                </p>
-              ) : (
-                prioritySkills.map((skill, index) => (
-                  <div
-                    key={`${skill}-${index}`}
-                    className="flex items-center gap-3 rounded-md border border-border bg-card px-3 py-3"
-                  >
-                    <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
-                      {index + 1}
-                    </span>
-
-                    <span className="text-sm font-medium text-foreground">
-                      {skill}
-                    </span>
-                  </div>
-                ))
-              )}
-
-              <Link
-                href="/roadmap"
-                className={buttonVariants({
-                  variant: "outline",
-                  size: "sm",
-                  className: "mt-2 w-full",
-                })}
-              >
-                Build full roadmap
-                <ArrowRight className="size-3.5" />
-              </Link>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Strengths</CardTitle>
-            </CardHeader>
-
-            <CardContent className="space-y-2">
-              {strengths.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No major strengths identified yet.
-                </p>
-              ) : (
-                strengths.map((skill, index) => (
-                  <div
-                    key={`${skill}-${index}`}
-                    className="flex items-center gap-2 text-sm"
-                  >
-                    <CheckCircle2 className="size-4 shrink-0 text-success" />
-                    <span className="text-foreground">{skill}</span>
-                  </div>
-                ))
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Job Fit</CardTitle>
-            </CardHeader>
-
-            <CardContent>
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-sm text-muted-foreground">
-                  Estimated fit
-                </span>
-
-                <span className="text-lg font-bold text-foreground">
-                  {Math.round(analysis.jobFit?.score ?? readiness)}%
-                </span>
-              </div>
-
-              <div className="h-2.5 overflow-hidden rounded-full bg-secondary">
-                <div
-                  className="h-full rounded-full bg-primary"
-                  style={{
-                    width: `${Math.max(
-                      0,
-                      Math.min(
-                        100,
-                        Math.round(
-                          analysis.jobFit?.score ?? readiness
-                        )
-                      )
-                    )}%`,
-                  }}
-                />
-              </div>
-
-              {analysis.jobFit?.explanation && (
-                <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                  {analysis.jobFit.explanation}
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-
-      <Card className="mt-6">
-        <CardHeader>
-          <div className="flex items-center justify-between gap-3">
-            <CardTitle>AI-Generated Learning Sequence</CardTitle>
-
-            <StatusBadge tone="primary">
-              {roadmap.length} steps
-            </StatusBadge>
+              )
+            })}
           </div>
-        </CardHeader>
+        </Section>
 
-        <CardContent className="space-y-4">
-          {roadmap.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              Open the learning roadmap to generate your detailed learning
-              plan.
-            </p>
-          ) : (
-            roadmap.slice(0, 8).map((item, index) => (
-              <div
-                key={`${item.skill}-${index}`}
-                className="rounded-lg border border-border p-4"
-              >
-                <div className="flex items-start gap-3">
-                  <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-bold text-primary">
+        {/* ------------------------------------------------------ Priorities */}
+        {prioritySkills.length > 0 && (
+          <Section
+            title="Focus on these first"
+            description="The skills the analysis ranks as most important to learn next."
+            divider
+          >
+            <ol className="grid grid-cols-1 gap-x-10 gap-y-2 md:grid-cols-2">
+              {prioritySkills.map((skill, index) => {
+                const entry = lookup.get(skill.toLowerCase())
+                return (
+                  <li
+                    key={`${skill}-${index}`}
+                    className="reveal flex gap-5 border-b border-border py-5"
+                    style={{ "--i": index } as React.CSSProperties}
+                  >
+                    <span className="type-metric w-8 shrink-0 text-2xl text-subtle-foreground">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-base font-medium text-foreground">{skill}</p>
+                        {entry && (
+                          <span className={cn("text-xs", LEVEL_META[entry.level].text)}>
+                            {LEVEL_META[entry.level].label}
+                          </span>
+                        )}
+                      </div>
+                      {entry?.reason && (
+                        <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{entry.reason}</p>
+                      )}
+                    </div>
+                  </li>
+                )
+              })}
+            </ol>
+          </Section>
+        )}
+
+        {/* ------------------------------------------------------ Sequence */}
+        {roadmap.length > 0 && (
+          <Section
+            title="Suggested sequence"
+            description="The order this analysis recommends. Your learning roadmap builds a detailed plan with resources."
+            action={
+              <Link href="/roadmap" className={buttonVariants({ variant: "ghost", size: "sm" })}>
+                <Route />
+                Full roadmap
+              </Link>
+            }
+            divider
+          >
+            <ol className="relative">
+              <span aria-hidden="true" className="grow-y absolute bottom-6 left-[19px] top-6 w-px bg-[linear-gradient(to_bottom,var(--ai),var(--primary),oklch(1_0_0/8%))]" />
+              {roadmap.slice(0, 8).map((item, index) => (
+                <li
+                  key={`${item.skill}-${index}`}
+                  className="reveal relative flex gap-5 pb-8 last:pb-0"
+                  style={{ "--i": index } as React.CSSProperties}
+                >
+                  <span className="relative z-10 flex size-10 shrink-0 items-center justify-center rounded-full border border-border-strong bg-background text-sm font-semibold tabular-nums text-foreground">
                     {item.order || index + 1}
                   </span>
-
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="text-sm font-semibold text-foreground">
-                        {item.skill}
-                      </h3>
-
-                      {item.phase && (
-                        <StatusBadge tone="neutral">
-                          {item.phase}
-                        </StatusBadge>
-                      )}
-
-                      {item.estimatedHours && (
-                        <span className="text-xs text-muted-foreground">
-                          ~{item.estimatedHours}h
-                        </span>
-                      )}
+                  <div className="min-w-0 flex-1 pt-1.5">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <h3 className="text-base font-medium text-foreground">{item.skill}</h3>
+                      {item.phase && <StatusBadge>{item.phase}</StatusBadge>}
+                      {item.estimatedHours ? (
+                        <span className="text-xs tabular-nums text-subtle-foreground">~{item.estimatedHours} h</span>
+                      ) : null}
                     </div>
-
                     {item.reason && (
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                        {item.reason}
-                      </p>
+                      <p className="mt-1.5 max-w-3xl text-sm leading-relaxed text-muted-foreground">{item.reason}</p>
                     )}
-
-                    {item.prerequisite && (
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        <span className="font-medium text-foreground">
-                          Prerequisite:
-                        </span>{" "}
-                        {item.prerequisite}
-                      </p>
-                    )}
-
-                    {Array.isArray(item.topics) &&
-                      item.topics.length > 0 && (
-                        <div className="mt-3 flex flex-wrap gap-1.5">
-                          {item.topics.slice(0, 5).map((topic) => (
-                            <span
-                              key={topic}
-                              className="rounded-md bg-secondary px-2 py-1 text-[11px] text-muted-foreground"
-                            >
-                              {topic}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
-                    {item.project && (
-                      <div className="mt-3 flex items-start gap-2 rounded-md bg-accent/40 p-2.5">
-                        <Code2 className="mt-0.5 size-3.5 shrink-0 text-primary" />
-                        <p className="text-xs text-muted-foreground">
-                          <span className="font-medium text-foreground">
-                            Project:
-                          </span>{" "}
-                          {item.project}
-                        </p>
+                    {Array.isArray(item.topics) && item.topics.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-1.5">
+                        {item.topics.slice(0, 5).map((topic) => (
+                          <span key={topic} className="rounded-md bg-surface-2 px-2 py-1 text-[11px] text-muted-foreground">
+                            {topic}
+                          </span>
+                        ))}
                       </div>
                     )}
+                    {item.project && (
+                      <p className="mt-3 flex max-w-3xl items-start gap-2 text-sm text-muted-foreground">
+                        <Code2 className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                        <span>
+                          <span className="font-medium text-foreground">Project: </span>
+                          {item.project}
+                        </span>
+                      </p>
+                    )}
                   </div>
-                </div>
-              </div>
-            ))
-          )}
-
-          <Link
-            href="/roadmap"
-            className={cn(
-              buttonVariants({ size: "sm" }),
-              "w-full sm:w-auto"
-            )}
-          >
-            Open full learning roadmap
-            <BookOpen className="size-3.5" />
-          </Link>
-        </CardContent>
-      </Card>
+                </li>
+              ))}
+            </ol>
+          </Section>
+        )}
+      </div>
     </div>
   )
 }

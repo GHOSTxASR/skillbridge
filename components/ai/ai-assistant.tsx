@@ -1,244 +1,103 @@
 "use client"
 
-import { supabase } from "@/lib/supabase-browser"
+import Link from "next/link"
+import { Dialog } from "@base-ui/react/dialog"
+import { Maximize2, Sparkles, X } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { ChatThread } from "@/components/ai/chat-thread"
+import { setAssistantOpen, useChat } from "@/components/ai/chat-store"
 
-import { useEffect, useState } from "react"
-
-type Message = {
-  role: "user" | "ai"
-  text: string
-}
-
-type Profile = {
-  name?: string
-  email?: string
-  education?: string
-  institution?: string
-  skills?: string
-  career?: string
-}
-
-export function AIAssistant() {
-  const [open, setOpen] = useState(false)
-  const [message, setMessage] = useState("")
-  const [loading, setLoading] = useState(false)
-
-  const [profile, setProfile] = useState<Profile>({})
-
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "ai",
-      text: "Hi! I am your SkillBridge Help Assistant. How can I help you today?",
-    },
-  ])
-
-  useEffect(() => {
-    async function loadProfile() {
-      try {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser()
-
-        if (!user) return
-
-        const saved = localStorage.getItem(`skillbridge-profile-${user.id}`)
-
-        if (saved) {
-          setProfile(JSON.parse(saved))
-        }
-      } catch {
-        console.log("Could not load profile")
-      }
-    }
-
-    loadProfile()
-  }, [])
-
-  const sendMessage = async () => {
-    const text = message.trim()
-
-    if (!text || loading) return
-
-    setMessage("")
-
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: "user",
-        text,
-      },
-    ])
-
-    setLoading(true)
-
-    try {
-      const response = await fetch("/api/ai", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: text,
-          profile,
-        }),
-      })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || "AI request failed")
-      }
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "ai",
-          text: data.reply,
-        },
-      ])
-    } catch (error) {
-      console.error(error)
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "ai",
-          text: "Sorry, I could not connect to the AI right now. Please try again.",
-        },
-      ])
-    } finally {
-      setLoading(false)
-    }
+// Opens the assistant panel. `compact` is the icon-only form used in the mobile bar.
+export function AssistantTrigger({ compact = false }: { compact?: boolean }) {
+  if (compact) {
+    return (
+      <button
+        type="button"
+        onClick={() => setAssistantOpen(true)}
+        aria-label="Open SkillBridge assistant"
+        className="pressable flex size-10 items-center justify-center rounded-lg text-ai hover:bg-ai-muted"
+      >
+        <Sparkles className="size-5" />
+      </button>
+    )
   }
 
   return (
-    <>
-      {!open && (
-        <button
-          onClick={() => setOpen(true)}
-          className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full border bg-card text-primary shadow-lg transition hover:scale-105"
-          aria-label="Open Help"
-        >
-          <svg
-            viewBox="0 0 64 64"
-            className="h-8 w-8"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <rect
-              x="10"
-              y="16"
-              width="44"
-              height="36"
-              rx="14"
-              stroke="currentColor"
-              strokeWidth="4"
-            />
-            <path
-              d="M32 16V9"
-              stroke="currentColor"
-              strokeWidth="4"
-              strokeLinecap="round"
-            />
-            <circle cx="32" cy="7" r="3" fill="currentColor" />
-            <circle cx="24" cy="32" r="4" fill="currentColor" />
-            <circle cx="40" cy="32" r="4" fill="currentColor" />
-            <path
-              d="M23 42C28 46 36 46 41 42"
-              stroke="currentColor"
-              strokeWidth="3"
-              strokeLinecap="round"
-            />
-            <path
-              d="M10 31H5M59 31H54"
-              stroke="currentColor"
-              strokeWidth="3"
-            />
-          </svg>
-        </button>
-      )}
-
-      {open && (
-        <div className="fixed bottom-6 right-6 z-50 flex h-[520px] w-[360px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border bg-card shadow-2xl">
-          <div className="flex items-center justify-between border-b bg-primary px-4 py-3 text-primary-foreground">
-            <div>
-              <h2 className="font-semibold">Help</h2>
-              <p className="text-xs opacity-80">
-                SkillBridge Assistant
-              </p>
-            </div>
-
-            <button
-              onClick={() => setOpen(false)}
-              className="rounded-lg px-2 py-1 text-lg hover:bg-primary-foreground/10"
-              aria-label="Close Help"
-            >
-              X
-            </button>
-          </div>
-
-          <div className="flex-1 space-y-3 overflow-y-auto p-4">
-            {messages.map((item, index) => (
-              <div
-                key={index}
-                className={`flex ${
-                  item.role === "user"
-                    ? "justify-end"
-                    : "justify-start"
-                }`}
-              >
-                <div
-                  className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${
-                    item.role === "user"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted"
-                  }`}
-                >
-                  {item.text}
-                </div>
-              </div>
-            ))}
-
-            {loading && (
-              <div className="flex justify-start">
-                <div className="rounded-2xl bg-muted px-3 py-2 text-sm">
-                  Thinking...
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="border-t p-3">
-            <div className="flex gap-2">
-              <input
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    sendMessage()
-                  }
-                }}
-                placeholder="Ask for help..."
-                disabled={loading}
-                className="min-w-0 flex-1 rounded-xl border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary disabled:opacity-60"
-              />
-
-              <button
-                onClick={sendMessage}
-                disabled={loading}
-                className="rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
-              >
-                Send
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+    <button
+      type="button"
+      onClick={() => setAssistantOpen(true)}
+      className="pressable group flex h-12 items-center gap-2.5 rounded-full border border-ai/25 bg-[oklch(0.19_0.02_220/85%)] pl-3.5 pr-5 text-sm font-medium text-foreground shadow-[0_12px_40px_-12px_oklch(0.82_0.11_192/35%)] backdrop-blur-xl hover:border-ai/40"
+    >
+      <span className="flex size-7 items-center justify-center rounded-full bg-ai-muted text-ai transition-transform duration-300 group-hover:rotate-12">
+        <Sparkles className="size-4" />
+      </span>
+      Ask SkillBridge
+    </button>
   )
 }
 
+// A docked, non-blocking panel: it slides in from the right edge, leaves the page
+// usable, and closes back to the right (Escape or the close button).
+// `floating`: where the floating "Ask SkillBridge" button shows. Screens that place a
+// trigger themselves (the mobile bar, the onboarding header) use "desktop" or "none".
+export function AIAssistant({
+  floating = "desktop",
+}: {
+  floating?: "desktop" | "none"
+}) {
+  const { open } = useChat()
 
+  return (
+    <>
+      {!open && floating !== "none" && (
+        <div className={cn("fixed bottom-6 right-6 z-40 hidden lg:flex reveal")}>
+          <AssistantTrigger />
+        </div>
+      )}
 
-
-
+      <Dialog.Root
+        open={open}
+        onOpenChange={setAssistantOpen}
+        modal={false}
+        disablePointerDismissal
+      >
+        <Dialog.Portal>
+          <Dialog.Popup
+            initialFocus={false}
+            className="surface-glass fixed inset-0 z-50 flex flex-col outline-none transition-[transform,opacity] duration-300 ease-[var(--ease-out)] data-[ending-style]:translate-x-6 data-[ending-style]:opacity-0 data-[starting-style]:translate-x-6 data-[starting-style]:opacity-0 sm:inset-y-3 sm:left-auto sm:right-3 sm:w-[420px] sm:rounded-2xl sm:shadow-[0_30px_80px_-20px_rgb(0_0_0/70%)]"
+          >
+            <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+              <span className="flex size-9 items-center justify-center rounded-xl bg-ai-muted text-ai">
+                <Sparkles className="size-4.5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <Dialog.Title className="text-sm font-semibold text-foreground">
+                  SkillBridge Assistant
+                </Dialog.Title>
+                <Dialog.Description className="text-xs text-subtle-foreground">
+                  Career guidance for your target role
+                </Dialog.Description>
+              </div>
+              <Link
+                href="/ai"
+                onClick={() => setAssistantOpen(false)}
+                aria-label="Open full-page assistant"
+                title="Open full page"
+                className="pressable flex size-9 items-center justify-center rounded-lg text-subtle-foreground hover:bg-surface-2 hover:text-foreground"
+              >
+                <Maximize2 className="size-4" />
+              </Link>
+              <Dialog.Close
+                aria-label="Close assistant"
+                className="pressable flex size-9 items-center justify-center rounded-lg text-subtle-foreground hover:bg-surface-2 hover:text-foreground"
+              >
+                <X className="size-4.5" />
+              </Dialog.Close>
+            </div>
+            <ChatThread variant="panel" autoFocus={open} />
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </>
+  )
+}

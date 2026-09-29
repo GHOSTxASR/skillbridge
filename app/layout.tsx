@@ -35,12 +35,10 @@ export const metadata: Metadata = {
   },
 }
 
+// SkillBridge has one deliberate dark environment (see app/globals.css).
 export const viewport: Viewport = {
-  colorScheme: 'light dark',
-  themeColor: [
-    { media: '(prefers-color-scheme: light)', color: 'white' },
-    { media: '(prefers-color-scheme: dark)', color: 'black' },
-  ],
+  colorScheme: 'dark',
+  themeColor: '#0f1116',
 }
 
 export default function RootLayout({
@@ -51,7 +49,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${jetbrainsMono.variable} bg-background`}
+      className={`dark ${inter.variable} ${jetbrainsMono.variable} bg-background`}
     >
       <body className="font-sans antialiased">
         <AppShell>

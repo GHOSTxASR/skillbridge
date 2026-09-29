@@ -6,13 +6,15 @@ export type BadgeTone =
   | "neutral"
   | "primary"
   | "danger"
+  | "ai"
 
 const toneStyles: Record<BadgeTone, string> = {
-  success: "bg-success-muted text-success border-success/20",
-  warning: "bg-warning-muted text-warning border-warning/25",
-  neutral: "bg-secondary text-secondary-foreground border-border",
-  primary: "bg-accent text-accent-foreground border-primary/15",
-  danger: "bg-destructive/10 text-destructive border-destructive/20",
+  success: "bg-success-muted text-success ring-success/20",
+  warning: "bg-warning-muted text-warning ring-warning/20",
+  neutral: "bg-surface-2 text-muted-foreground ring-border",
+  primary: "bg-accent text-accent-foreground ring-primary/20",
+  danger: "bg-destructive-muted text-destructive ring-destructive/20",
+  ai: "bg-ai-muted text-ai ring-ai/20",
 }
 
 export function StatusBadge({
@@ -29,7 +31,7 @@ export function StatusBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium",
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset [&_svg]:size-3.5",
         toneStyles[tone],
         className,
       )}

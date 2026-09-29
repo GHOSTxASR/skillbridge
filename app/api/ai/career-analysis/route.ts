@@ -1,6 +1,20 @@
 ﻿import { NextResponse } from "next/server"
+import { createHash } from "node:crypto"
 import { createSupabaseServerClient } from "@/lib/supabase-server"
-import { groqJSON } from "@/lib/ai/groq"
+import { groqJSONOutcome, groqModel } from "@/lib/ai/groq"
+import { shareInFlight } from "@/lib/ai/in-flight"
+import { admitGeneration, rateLimitedResponse } from "@/lib/ai/rate-limit"
+import {
+  loadCareerProfile,
+  type CareerProfile,
+} from "@/lib/ai/profile-input"
+
+// Part of every stored analysis's input hash. Bump it whenever SYSTEM_PROMPT, the Groq
+// options or readAnalysis() changes, so older stored analyses are regenerated.
+const CAREER_PROMPT_VERSION = "career-v1"
+
+// Same limit as the career_analyses.analysis check constraint.
+const MAX_STORED_ANALYSIS_LENGTH = 100_000
 
 type SkillAnalysis = {
   targetRole: string
@@ -45,93 +59,31 @@ type SkillAnalysis = {
   aiAvailable: boolean
 }
 
-function clean(value: unknown): string {
-  if (typeof value !== "string") return ""
+// The body carries nothing the analysis needs: it always uses the signed-in user's saved
+// profile. Older clients send { profile: {...} }; its shape is checked but never used.
+const MAX_BODY_LENGTH = 20_000
 
-  return value
-    .replace(/[^\w\s.+#/&-]/g, "")
-    .trim()
+function isPlainObject(
+  value: unknown
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  )
 }
 
-function skills(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
-
-  return value
-    .map(clean)
-    .filter(Boolean)
-    .filter((skill, index, array) => {
-      return (
-        array.findIndex(
-          x => x.toLowerCase() === skill.toLowerCase()
-        ) === index
-      )
-    })
+function badRequest(error: string) {
+  return NextResponse.json(
+    { error, aiAvailable: false },
+    { status: 400 }
+  )
 }
 
-// body.profile is untrusted client input (app/gap-analysis sends the assessment's
-// role/skills/experience). Only these fields are taken, type-checked and bounded;
-// a field with the wrong type is ignored so the database value is kept.
-const SUPPLIED_TEXT_LIMITS = {
-  target_role: 150,
-  experience_level: 100,
-  education: 300,
-  bio: 1000,
-} as const
-
-const MAX_SUPPLIED_SKILLS = 30
-const MAX_SKILL_LENGTH = 80
-
-type SuppliedProfile = {
-  -readonly [K in keyof typeof SUPPLIED_TEXT_LIMITS]?: string
-} & { skills?: string[] }
-
-function sanitizeSuppliedProfile(value: unknown): SuppliedProfile {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
-
-  const input = value as Record<string, unknown>
-  const profile: SuppliedProfile = {}
-
-  for (const field of Object.keys(SUPPLIED_TEXT_LIMITS) as Array<keyof typeof SUPPLIED_TEXT_LIMITS>) {
-    const raw = input[field]
-    if (typeof raw === "string") {
-      profile[field] = raw.trim().slice(0, SUPPLIED_TEXT_LIMITS[field])
-    }
-  }
-
-  if (Array.isArray(input.skills)) {
-    const seen = new Set<string>()
-    const accepted: string[] = []
-
-    for (const item of input.skills) {
-      if (accepted.length === MAX_SUPPLIED_SKILLS) break
-      if (typeof item !== "string") continue
-
-      const skill = item.trim()
-      // Over-long entries are dropped rather than cut, since a partial name is not a skill.
-      if (!skill || skill.length > MAX_SKILL_LENGTH) continue
-
-      const key = skill.toLowerCase()
-      if (seen.has(key)) continue
-
-      seen.add(key)
-      accepted.push(skill)
-    }
-
-    profile.skills = accepted
-  }
-
-  return profile
-}
-
-function fallback(profile: any): SkillAnalysis {
-  const targetRole =
-    typeof profile?.target_role === "string" &&
-    profile.target_role.trim()
-      ? profile.target_role.trim()
-      : "Software Engineer"
-
-  const currentSkills = skills(profile?.skills)
-
+function fallback(
+  targetRole: string,
+  currentSkills: string[]
+): SkillAnalysis {
   const role = targetRole.toLowerCase()
 
   let requiredSkills: string[]
@@ -311,12 +263,287 @@ function fallback(profile: any): SkillAnalysis {
   }
 }
 
+// --- AI output validation -------------------------------------------------------------
+// The model's JSON is untrusted: every field is type-checked and bounded, and an answer
+// missing a core field is rejected rather than shown as an AI analysis.
+
+function text(value: unknown, maxLength: number): string {
+  return typeof value === "string"
+    ? value.replace(/\s+/g, " ").trim().slice(0, maxLength)
+    : ""
+}
+
+function list(value: unknown, maxItems: number): string[] | null {
+  if (!Array.isArray(value)) return null
+
+  const seen = new Set<string>()
+  const items: string[] = []
+
+  for (const item of value) {
+    if (items.length === maxItems) break
+
+    const entry = text(item, 80)
+    if (!entry || seen.has(entry.toLowerCase())) continue
+
+    seen.add(entry.toLowerCase())
+    items.push(entry)
+  }
+
+  return items
+}
+
+function score(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(100, Math.round(value)))
+    : null
+}
+
+function oneOf<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  otherwise: T
+): T {
+  return allowed.includes(value as T) ? (value as T) : otherwise
+}
+
+type AIAnalysis = Omit<
+  SkillAnalysis,
+  "targetRole" | "currentSkills" | "aiAvailable"
+>
+
+function readAnalysis(data: unknown): AIAnalysis | null {
+  if (!isPlainObject(data)) return null
+
+  const readiness = score(data.readiness)
+  const summary = text(data.summary, 1000)
+  const strengths = list(data.strengths, 15)
+  const missingSkills = list(data.missingSkills, 15)
+  const weakSkills = list(data.weakSkills, 10)
+  const prioritySkills = list(data.prioritySkills, 10)
+
+  if (
+    readiness === null ||
+    !summary ||
+    !strengths ||
+    !missingSkills ||
+    !weakSkills ||
+    !prioritySkills ||
+    !Array.isArray(data.roadmap)
+  ) {
+    return null
+  }
+
+  const roadmap = data.roadmap
+    .filter(isPlainObject)
+    .map((item) => ({
+      skill: text(item.skill, 80),
+      phase: text(item.phase, 40),
+      reason: text(item.reason, 300),
+      prerequisite: text(item.prerequisite, 120) || "None",
+      estimatedHours:
+        typeof item.estimatedHours === "number" &&
+        Number.isFinite(item.estimatedHours) &&
+        item.estimatedHours > 0
+          ? Math.min(500, Math.round(item.estimatedHours))
+          : 25,
+      topics: list(item.topics, 6) ?? [],
+      practice: list(item.practice, 4) ?? [],
+      project: text(item.project, 300),
+      checkpoint: text(item.checkpoint, 300),
+    }))
+    .filter((item) => item.skill)
+    .slice(0, 10)
+    .map((item, index) => ({
+      order: index + 1,
+      ...item,
+      phase: item.phase || `Phase ${index + 1}`,
+    }))
+
+  if (roadmap.length === 0) return null
+
+  const skillGaps = Array.isArray(data.skillGaps)
+    ? data.skillGaps
+        .filter(isPlainObject)
+        .map((gap) => ({
+          skill: text(gap.skill, 80),
+          status: oneOf(gap.status, ["missing", "weak", "strength"] as const, "missing"),
+          priority: oneOf(gap.priority, ["high", "medium", "low"] as const, "medium"),
+          reason: text(gap.reason, 300),
+        }))
+        .filter((gap) => gap.skill)
+        .slice(0, 20)
+    : []
+
+  const jobFit = isPlainObject(data.jobFit) ? data.jobFit : {}
+
+  return {
+    readiness,
+    summary,
+    strengths,
+    // Not requested from the model (it only repeated the other lists); rebuilt here.
+    requiredSkills: list(
+      [...strengths, ...weakSkills, ...missingSkills],
+      20
+    ) ?? [],
+    missingSkills,
+    weakSkills,
+    prioritySkills,
+    skillGaps,
+    roadmap,
+    jobFit: {
+      score: score(jobFit.score) ?? readiness,
+      explanation: text(jobFit.explanation, 600),
+    },
+  }
+}
+
+// --- Persistent cache (public.career_analyses) ------------------------------------------
+
+// Case and spacing do not change what an analysis is for, so they do not change the key.
+function keyText(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase()
+}
+
+// Deterministic key for "same inputs, same model, same prompt". It covers everything the
+// prompt is built from; the user id is not part of it (each user has one row).
+function careerInputHash(profile: CareerProfile, model: string): string {
+  const skills = Array.from(new Set(profile.skills.map(keyText))).sort()
+
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        targetRole: keyText(profile.targetRole),
+        experience: keyText(profile.experience),
+        skills,
+        model,
+        promptVersion: CAREER_PROMPT_VERSION,
+      })
+    )
+    .digest("hex")
+}
+
+type StoredAnalysis = { analysis: AIAnalysis; generatedAt: string }
+
+// A stored row is reused only for the same inputs, model and prompt version, when it is
+// marked as AI output, within size limits and still valid under readAnalysis().
+function usableStoredAnalysis(
+  row: unknown,
+  inputHash: string,
+  model: string
+): StoredAnalysis | null {
+  if (
+    !isPlainObject(row) ||
+    row.input_hash !== inputHash ||
+    row.model !== model ||
+    row.prompt_version !== CAREER_PROMPT_VERSION ||
+    !isPlainObject(row.analysis) ||
+    row.analysis.aiAvailable !== true ||
+    JSON.stringify(row.analysis).length > MAX_STORED_ANALYSIS_LENGTH
+  ) {
+    return null
+  }
+
+  const analysis = readAnalysis(row.analysis)
+  const generatedAt =
+    typeof row.generated_at === "string" ? new Date(row.generated_at) : null
+
+  if (!analysis || !generatedAt || Number.isNaN(generatedAt.getTime())) {
+    return null
+  }
+
+  return { analysis, generatedAt: generatedAt.toISOString() }
+}
+
+// retryAfterSeconds is set only when the per-user limit refused the generation.
+type Generation =
+  | { ok: true; analysis: AIAnalysis; generatedAt: string }
+  | { ok: false; reason: string; retryAfterSeconds?: number }
+
+type ServerClient = Awaited<ReturnType<typeof createSupabaseServerClient>>
+
+// One admission and one Groq call; a validated result is stored for the user, anything
+// else is not.
+async function generateAnalysis(
+  supabase: ServerClient,
+  userId: string,
+  profile: CareerProfile,
+  inputHash: string,
+  model: string
+): Promise<Generation> {
+  const admission = await admitGeneration(supabase, "career_analysis")
+
+  if (!admission.allowed) {
+    return admission.reason === "rate_limited"
+      ? {
+          ok: false,
+          reason: "limit_reached",
+          retryAfterSeconds: admission.retryAfterSeconds,
+        }
+      : { ok: false, reason: "unavailable" }
+  }
+
+  // Low reasoning effort: on gpt-oss the hidden reasoning shares the output token cap,
+  // and long reasoning left too little room for the JSON (truncated or empty replies).
+  const ai = await groqJSONOutcome(
+    SYSTEM_PROMPT,
+    `Target role: ${profile.targetRole}
+Current skills: ${profile.skills.length ? profile.skills.join(", ") : "None"}
+Experience: ${profile.experience || "Not provided"}`,
+    { reasoningEffort: "low" }
+  )
+
+  const analysis = ai.ok ? readAnalysis(ai.data) : null
+
+  if (!analysis) {
+    if (ai.ok) {
+      console.error("Career analysis: AI output failed validation", {
+        model: ai.model,
+      })
+    }
+
+    return { ok: false, reason: ai.ok ? "invalid_output" : ai.reason }
+  }
+
+  const generatedAt = new Date().toISOString()
+
+  // A failed write still returns the new analysis; it is simply regenerated next time.
+  const { error } = await supabase
+    .from("career_analyses")
+    .upsert(
+      {
+        user_id: userId,
+        input_hash: inputHash,
+        analysis: { ...analysis, aiAvailable: true },
+        model,
+        generated_at: generatedAt,
+        prompt_version: CAREER_PROMPT_VERSION,
+      },
+      { onConflict: "user_id" }
+    )
+
+  if (error) {
+    console.error("Career analysis cache write failed:", error.code ?? "unknown")
+  }
+
+  return { ok: true, analysis, generatedAt }
+}
+
+// Compact on purpose: the previous open-ended schema regularly ran past the output
+// token cap and came back as truncated JSON.
+const SYSTEM_PROMPT = `You are SkillBridge's expert AI Career Coach. Compare the student's current skills with what the target role needs and plan what to learn next.
+
+Rules:
+- Be specific to the target role. No generic motivation.
+- Never list the target role itself as a skill. Do not copy the student's skills into the gaps.
+- readiness and jobFit.score are your own estimate, from 0 to 100, of how much of the role's core skill set the student already has.
+- Keep every text short: summary at most 60 words; each reason, explanation, project and checkpoint at most 20 words; each topic and practice item at most 6 words.
+- Limits: strengths up to 8, missingSkills up to 8, weakSkills up to 5, prioritySkills up to 6, skillGaps up to 8, roadmap 5 to 6 items in prerequisite order, topics up to 3 per item, practice up to 2 per item.
+- status is one of missing, weak, strength. priority is one of high, medium, low.
+- Output minified JSON on a single line, with exactly these keys. Values in angle brackets only describe the type; replace them with real values:
+{"readiness":<integer 0-100>,"summary":"<text>","strengths":["<skill>"],"missingSkills":["<skill>"],"weakSkills":["<skill>"],"prioritySkills":["<skill>"],"skillGaps":[{"skill":"<skill>","status":"<missing|weak|strength>","priority":"<high|medium|low>","reason":"<text>"}],"roadmap":[{"order":<integer>,"phase":"<text>","skill":"<skill>","reason":"<text>","prerequisite":"<skill or None>","estimatedHours":<integer>,"topics":["<text>"],"practice":["<text>"],"project":"<text>","checkpoint":"<text>"}],"jobFit":{"score":<integer 0-100>,"explanation":"<text>"}}`
+
 export async function POST(request: Request) {
   try {
-    const body = await request.json().catch(() => ({}))
-
-    const suppliedProfile = sanitizeSuppliedProfile(body?.profile)
-
     const supabase = await createSupabaseServerClient()
 
     const {
@@ -330,159 +557,134 @@ export async function POST(request: Request) {
       )
     }
 
-    const { data: dbProfile } = await supabase
-      .from("profiles")
-      .select(
-        "target_role, skills, experience_level, education"
+    const rawBody = await request.text()
+
+    if (rawBody.length > MAX_BODY_LENGTH) {
+      return badRequest("Request body too large")
+    }
+
+    let body: unknown = {}
+
+    if (rawBody.trim()) {
+      try {
+        body = JSON.parse(rawBody)
+      } catch {
+        return badRequest("Invalid JSON body")
+      }
+    }
+
+    if (
+      !isPlainObject(body) ||
+      (body.profile !== undefined &&
+        body.profile !== null &&
+        !isPlainObject(body.profile))
+    ) {
+      return badRequest("Invalid request body")
+    }
+
+    const loaded = await loadCareerProfile(supabase, user.id)
+
+    if (loaded.status === "missing") {
+      return NextResponse.json(
+        { error: "Profile setup required", aiAvailable: false },
+        { status: 409 }
       )
-      .eq("id", user.id)
+    }
+
+    if (loaded.status === "error") {
+      return NextResponse.json(
+        { error: "Profile unavailable", aiAvailable: false },
+        { status: 503 }
+      )
+    }
+
+    const profile = loaded.profile
+    const { targetRole, skills: currentSkills } = profile
+
+    const model = groqModel()
+    const inputHash = careerInputHash(profile, model)
+
+    // ?refresh=1 is the explicit "analyze again" action; everything else is cache-aware.
+    const refresh =
+      new URL(request.url).searchParams.get("refresh") === "1"
+
+    // RLS limits this to the signed-in user's own row.
+    const { data: storedRow, error: readError } = await supabase
+      .from("career_analyses")
+      .select("input_hash, analysis, model, generated_at, prompt_version")
+      .eq("user_id", user.id)
       .maybeSingle()
 
-    const profile = {
-      ...(dbProfile ?? {}),
-      ...suppliedProfile,
+    if (readError) {
+      console.error("Career analysis cache read failed:", readError.code ?? "unknown")
     }
 
-    const targetRole =
-      typeof profile.target_role === "string" &&
-      profile.target_role.trim()
-        ? profile.target_role.trim()
-        : "Software Engineer"
+    const stored = usableStoredAnalysis(storedRow, inputHash, model)
 
-    const currentSkills = skills(profile.skills)
-
-    const fallbackResult = fallback(profile)
-
-    const ai = await groqJSON<SkillAnalysis>(
-      `You are SkillBridge's expert AI Career Coach.
-
-You must perform a REAL personalized skill-gap analysis.
-
-TARGET ROLE:
-${targetRole}
-
-CURRENT SKILLS:
-${
-  currentSkills.length
-    ? currentSkills.join(", ")
-    : "No skills provided"
-}
-
-EXPERIENCE LEVEL:
-${profile.experience_level || "Not provided"}
-
-Your task:
-
-1. Determine the real skills required for the target role.
-2. Compare them against the user's current skills.
-3. Identify strengths.
-4. Identify missing skills.
-5. Identify weak skills.
-6. Explain WHY each gap matters.
-7. Rank gaps by HIGH/MEDIUM/LOW priority.
-8. Calculate realistic job readiness from the comparison.
-9. Create a prerequisite-based learning roadmap.
-10. DO NOT simply copy the user's current skills.
-11. DO NOT include the target role itself as a skill.
-12. Return 5-10 important roadmap skills.
-13. Start from fundamentals when prerequisites are missing.
-14. Each roadmap item must include topics, practice and a project.
-15. The roadmap must be practical for a student trying to become job-ready.
-16. Be specific to the target role.
-17. Do not make generic motivational statements.
-18. Return ONLY valid JSON.
-
-JSON FORMAT:
-
-{
-  "targetRole": "string",
-  "readiness": 0,
-  "summary": "specific analysis",
-  "strengths": ["skill"],
-  "currentSkills": ["skill"],
-  "requiredSkills": ["skill"],
-  "missingSkills": ["skill"],
-  "weakSkills": ["skill"],
-  "prioritySkills": ["skill"],
-  "skillGaps": [
-    {
-      "skill": "string",
-      "status": "missing",
-      "priority": "high",
-      "reason": "specific reason"
+    if (stored && !refresh) {
+      return NextResponse.json({
+        ...stored.analysis,
+        targetRole,
+        currentSkills,
+        aiAvailable: true,
+        cached: true,
+        generatedAt: stored.generatedAt,
+      })
     }
-  ],
-  "roadmap": [
-    {
-      "order": 1,
-      "phase": "Phase 1",
-      "skill": "string",
-      "reason": "why this comes now",
-      "prerequisite": "None",
-      "estimatedHours": 25,
-      "topics": ["topic1", "topic2"],
-      "practice": ["task1", "task2"],
-      "project": "project idea",
-      "checkpoint": "completion condition"
-    }
-  ],
-  "jobFit": {
-    "score": 0,
-    "explanation": "specific explanation"
-  }
-}`,
-      `Analyze this student's profile now.
 
-Target role: ${targetRole}
-
-Current skills:
-${
-  currentSkills.length
-    ? currentSkills.join(", ")
-    : "None"
-}
-
-Experience:
-${profile.experience_level || "Unknown"}
-
-Produce the complete personalized analysis and roadmap.`,
-      fallbackResult
+    // Only a cache miss or ?refresh=1 gets here. Identical concurrent requests (same user,
+    // same inputs) share one admission and one Groq call.
+    const generated = await shareInFlight(
+      `career-analysis:${user.id}:${inputHash}`,
+      () => generateAnalysis(supabase, user.id, profile, inputHash, model)
     )
 
-    const validAI =
-      ai &&
-      Array.isArray(ai.missingSkills) &&
-      Array.isArray(ai.weakSkills) &&
-      Array.isArray(ai.prioritySkills) &&
-      Array.isArray(ai.roadmap) &&
-      ai.roadmap.length > 0
+    // Over the per-user limit: refused before any Groq call, even for a refresh that
+    // has a saved analysis to fall back on.
+    if (!generated.ok && generated.retryAfterSeconds !== undefined) {
+      return rateLimitedResponse(generated.retryAfterSeconds, {
+        aiAvailable: false,
+      })
+    }
 
-    if (!validAI) {
-      return NextResponse.json(fallbackResult)
+    if (generated.ok) {
+      return NextResponse.json({
+        ...generated.analysis,
+        targetRole,
+        currentSkills,
+        aiAvailable: true,
+        cached: false,
+        generatedAt: generated.generatedAt,
+      })
+    }
+
+    // No new AI analysis. A valid stored one is kept and returned (a failed refresh never
+    // replaces it); without one, the estimate is returned, marked as not AI.
+    if (stored) {
+      return NextResponse.json({
+        ...stored.analysis,
+        targetRole,
+        currentSkills,
+        aiAvailable: true,
+        cached: true,
+        generatedAt: stored.generatedAt,
+        reason: generated.reason,
+      })
     }
 
     return NextResponse.json({
-      ...ai,
-      targetRole,
-      currentSkills,
-      aiAvailable: true,
-      generatedAt: new Date().toISOString(),
+      ...fallback(targetRole, currentSkills),
+      reason: generated.reason,
     })
   } catch (error) {
     console.error(
       "Career analysis error:",
-      error
+      error instanceof Error ? error.message : "unknown error"
     )
 
     return NextResponse.json(
-      {
-        ...fallback({
-          target_role: "Software Engineer",
-          skills: [],
-        }),
-        aiAvailable: false,
-      },
-      { status: 200 }
+      { error: "Career analysis failed", aiAvailable: false },
+      { status: 500 }
     )
   }
 }

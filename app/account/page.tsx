@@ -1,7 +1,16 @@
 "use client"
 
+import Link from "next/link"
 import { supabase } from "@/lib/supabase-browser"
 import { useEffect, useState } from "react"
+import { ArrowRight, Check, GraduationCap, Loader2, Pencil, Target, UserRound } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { refreshShellProfile } from "@/lib/profile-store"
+import { Button, buttonVariants } from "@/components/ui/button"
+import { Input, Label, Textarea, FieldHint } from "@/components/ui/field"
+import { Eyebrow } from "@/components/ui/page"
+import { Notice, Skeleton } from "@/components/ui/states"
+import { SkillBadge } from "@/components/skill-badge"
 
 const defaultProfile = {
   name: "",
@@ -10,13 +19,68 @@ const defaultProfile = {
   institution: "",
   skills: "",
   career: "",
+  experience: "",
+}
+
+type Profile = typeof defaultProfile
+
+function skillList(value: string) {
+  return value
+    .split(",")
+    .map((skill) => skill.trim())
+    .filter(Boolean)
+}
+
+function FieldRow({
+  label,
+  id,
+  value,
+  editing,
+  onChange,
+  placeholder,
+  readOnlyNote,
+}: {
+  label: string
+  id: string
+  value: string
+  editing: boolean
+  onChange?: (value: string) => void
+  placeholder?: string
+  readOnlyNote?: React.ReactNode
+}) {
+  const editable = editing && onChange
+
+  return (
+    <div className="grid grid-cols-1 gap-2 py-5 sm:grid-cols-[12rem_minmax(0,1fr)] sm:items-center sm:gap-6">
+      {editable ? (
+        <Label htmlFor={id} className="mb-0">
+          {label}
+        </Label>
+      ) : (
+        <p className="text-[0.8125rem] font-medium text-muted-foreground">{label}</p>
+      )}
+      <div className="min-w-0">
+        {editable ? (
+          <Input id={id} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="h-11" />
+        ) : (
+          <p className={cn("text-[0.9375rem]", value ? "text-foreground" : "text-subtle-foreground")}>
+            {value || "Not set"}
+          </p>
+        )}
+        {readOnlyNote && <FieldHint className="mt-1.5">{readOnlyNote}</FieldHint>}
+      </div>
+    </div>
+  )
 }
 
 export default function AccountPage() {
   const [editing, setEditing] = useState(false)
-  const [profile, setProfile] = useState(defaultProfile)
+  const [profile, setProfile] = useState<Profile>(defaultProfile)
+  const [saved, setSaved] = useState<Profile>(defaultProfile)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState("")
+  const [justSaved, setJustSaved] = useState(false)
 
   useEffect(() => {
     async function loadProfile() {
@@ -47,31 +111,25 @@ export default function AccountPage() {
           console.error("Profile fetch error:", error)
         }
 
-        setProfile({
+        // Only what is actually saved on the profile (no default or suggested skills).
+        const existing = Array.isArray(data?.skills)
+          ? data.skills
+          : typeof data?.skills === "string"
+            ? data.skills.split(",").map((skill: string) => skill.trim()).filter(Boolean)
+            : []
+
+        const loaded: Profile = {
           name: authName || data?.name || "",
           email: authEmail,
           education: data?.education ?? "",
           institution: data?.institution ?? "",
-          skills: (() => {
-            const existing = Array.isArray(data?.skills)
-              ? data.skills
-              : (typeof data?.skills === "string"
-                ? data.skills.split(",").map((skill: string) => skill.trim()).filter(Boolean)
-                : [])
-
-            const additions = [
-              "Statistics",
-              "NumPy",
-              "Pandas",
-              "Data Visualization",
-              "Machine Learning",
-              "Scikit-learn",
-            ]
-
-            return Array.from(new Set([...existing, ...additions])).join(", ")
-          })(),
+          skills: Array.from(new Set(existing.map(String))).join(", "),
           career: data?.target_role ?? "",
-        })
+          experience: data?.experience_level ?? "",
+        }
+
+        setProfile(loaded)
+        setSaved(loaded)
       } catch (error) {
         console.error("Account loading error:", error)
       } finally {
@@ -82,10 +140,7 @@ export default function AccountPage() {
     loadProfile()
   }, [])
 
-  const update = (
-    key: "education" | "institution" | "skills" | "career",
-    value: string
-  ) => {
+  const update = (key: "education" | "institution" | "skills" | "career", value: string) => {
     setProfile((prev) => ({
       ...prev,
       [key]: value,
@@ -94,6 +149,7 @@ export default function AccountPage() {
 
   const saveProfile = async () => {
     setSaving(true)
+    setSaveError("")
 
     try {
       const {
@@ -105,7 +161,7 @@ export default function AccountPage() {
         return
       }
 
-      const { error } = await supabase
+      const { data: savedRows, error } = await supabase
         .from("profiles")
         .update({
           education: profile.education,
@@ -114,216 +170,248 @@ export default function AccountPage() {
           target_role: profile.career,
         })
         .eq("id", user.id)
+        .select("id")
 
-      if (error) {
-  alert(String(error.message || error.code || "Profile save failed"))
-  console.error("Profile save error:", error)
-  return
-}
+      // No matching row (profile missing) is a failed save, not a success.
+      if (error || !savedRows?.length) {
+        setSaveError(String(error?.message || error?.code || "Your profile could not be saved."))
+        console.error("Profile save error:", error ?? "no profile row was updated")
+        return
+      }
 
+      setSaved(profile)
       setEditing(false)
+      setJustSaved(true)
+      void refreshShellProfile()
     } catch (error) {
       console.error("Save error:", JSON.stringify(error, null, 2))
+      setSaveError("Your profile could not be saved. Please try again.")
     } finally {
       setSaving(false)
     }
   }
 
+  useEffect(() => {
+    if (!justSaved) return
+    const timer = window.setTimeout(() => setJustSaved(false), 3500)
+    return () => window.clearTimeout(timer)
+  }, [justSaved])
+
   if (loading) {
     return (
-      <div className="flex min-h-[400px] items-center justify-center">
-        <p className="text-sm text-muted-foreground">
-          Loading account information...
-        </p>
+      <div aria-busy="true" aria-label="Loading your profile" className="grid grid-cols-1 gap-12 lg:grid-cols-[18rem_minmax(0,1fr)]">
+        <div className="space-y-4">
+          <Skeleton className="size-24 rounded-full" />
+          <Skeleton className="h-6 w-40" />
+          <Skeleton className="h-4 w-52" />
+        </div>
+        <div className="space-y-6">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
       </div>
     )
   }
 
+  const skills = skillList(profile.skills)
+  const initial = (profile.name || profile.email || "U").charAt(0).toUpperCase()
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            Account Information
-          </h1>
-
-          <p className="text-sm text-muted-foreground">
-            Manage your personal and career information.
-          </p>
-        </div>
-
-        <button
-          onClick={() => {
-            if (editing) {
-              saveProfile()
-            } else {
-              setEditing(true)
-            }
-          }}
-          disabled={saving}
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+    <div className="grid grid-cols-1 gap-12 lg:grid-cols-[18rem_minmax(0,1fr)] lg:gap-16">
+      {/* Identity */}
+      <aside className="lg:sticky lg:top-14 lg:self-start">
+        <Eyebrow tone="primary">Profile · You</Eyebrow>
+        <span
+          className="mt-6 flex size-24 items-center justify-center rounded-full p-[2px]"
+          style={{ background: "var(--brand-gradient)" }}
+          aria-hidden="true"
         >
-          {saving
-            ? "Saving..."
-            : editing
-              ? "Save Changes"
-              : "Edit Profile"}
-        </button>
-      </div>
+          <span className="flex size-full items-center justify-center rounded-full bg-background text-3xl font-semibold text-foreground">
+            {initial}
+          </span>
+        </span>
+        <h1 className="type-title mt-5 text-foreground">{profile.name || "Your profile"}</h1>
+        {profile.email && <p className="mt-1.5 break-all text-sm text-muted-foreground">{profile.email}</p>}
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className="rounded-2xl border bg-card p-6 shadow-sm">
-          <div className="flex flex-col items-center text-center">
-            <div className="flex h-24 w-24 items-center justify-center rounded-full bg-primary text-3xl font-bold text-primary-foreground">
-              {profile.name.charAt(0).toUpperCase() || "U"}
+        <dl className="mt-8 space-y-4 border-t border-border pt-6">
+          <div className="flex items-start gap-3">
+            <Target className="mt-0.5 size-4 shrink-0 text-primary" />
+            <div className="min-w-0">
+              <dt className="text-xs text-subtle-foreground">Career goal</dt>
+              <dd className="mt-0.5 text-sm font-medium text-foreground">{saved.career || "Not set"}</dd>
             </div>
+          </div>
+          <div className="flex items-start gap-3">
+            <UserRound className="mt-0.5 size-4 shrink-0 text-primary" />
+            <div className="min-w-0">
+              <dt className="text-xs text-subtle-foreground">Experience</dt>
+              <dd className="mt-0.5 text-sm font-medium text-foreground">{saved.experience || "Not set"}</dd>
+            </div>
+          </div>
+          <div className="flex items-start gap-3">
+            <GraduationCap className="mt-0.5 size-4 shrink-0 text-primary" />
+            <div className="min-w-0">
+              <dt className="text-xs text-subtle-foreground">Skills recorded</dt>
+              <dd className="mt-0.5 text-sm font-medium tabular-nums text-foreground">{skillList(saved.skills).length}</dd>
+            </div>
+          </div>
+        </dl>
 
-            <h2 className="mt-4 text-xl font-semibold">
-              {profile.name || "User"}
-            </h2>
+        <Link href="/assessment" className={cn(buttonVariants({ variant: "ghost", size: "sm" }), "mt-6 -ml-3")}>
+          Retake skill assessment
+          <ArrowRight />
+        </Link>
+      </aside>
 
+      {/* Details */}
+      <div className="min-w-0">
+        <div className="flex flex-col gap-4 border-b border-border pb-6 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="type-heading text-foreground">Profile details</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              {profile.career || "Career goal not set"}
+              The foundation SkillBridge uses to analyze your skills and match jobs.
             </p>
-
-            <div className="mt-5 w-full rounded-xl bg-muted/50 p-4 text-left">
-              <p className="text-xs font-medium text-muted-foreground">
-                PROFILE STATUS
-              </p>
-
-              <p className="mt-1 font-medium">Profile Active</p>
-            </div>
+          </div>
+          <div className="flex shrink-0 gap-2">
+            {editing ? (
+              <>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setProfile(saved)
+                    setEditing(false)
+                    setSaveError("")
+                  }}
+                  disabled={saving}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={saveProfile} disabled={saving}>
+                  {saving ? <Loader2 className="animate-spin" /> : <Check />}
+                  {saving ? "Saving…" : "Save changes"}
+                </Button>
+              </>
+            ) : (
+              <Button variant="secondary" onClick={() => setEditing(true)}>
+                <Pencil />
+                Edit profile
+              </Button>
+            )}
           </div>
         </div>
 
-        <div className="rounded-2xl border bg-card p-6 shadow-sm lg:col-span-2">
-          <h2 className="text-lg font-semibold">Personal Information</h2>
+        {saveError && (
+          <Notice tone="danger" className="mt-6">
+            {saveError}
+          </Notice>
+        )}
+        {justSaved && (
+          <Notice tone="success" className="mt-6">
+            Your profile was saved.
+          </Notice>
+        )}
 
-          <p className="mt-1 text-sm text-muted-foreground">
-            Your basic account details.
-          </p>
-
-          <div className="mt-6 grid gap-5 sm:grid-cols-2">
-            <Field
-              label="Full Name"
-              value={profile.name}
-              editing={false}
-              onChange={() => {}}
+        <section className="mt-10" aria-labelledby="career-title">
+          <h3 id="career-title" className="type-eyebrow text-subtle-foreground">Career</h3>
+          <div className="divide-y divide-border">
+            <FieldRow
+              id="career"
+              label="Career goal"
+              value={profile.career}
+              editing={editing}
+              onChange={(v) => update("career", v)}
+              placeholder="For example, Full Stack Developer"
             />
-
-            <Field
-              label="Email"
-              value={profile.email}
-              editing={false}
-              onChange={() => {}}
+            <FieldRow
+              id="experience"
+              label="Experience"
+              value={profile.experience}
+              editing={editing}
+              readOnlyNote={
+                editing ? (
+                  <>
+                    Change your experience level in the{" "}
+                    <Link href="/assessment" className="text-primary underline-offset-4 hover:underline">
+                      skill assessment
+                    </Link>
+                    .
+                  </>
+                ) : undefined
+              }
             />
+          </div>
+        </section>
 
-            <Field
+        <section className="mt-12" aria-labelledby="skills-title">
+          <h3 id="skills-title" className="type-eyebrow text-subtle-foreground">Skills</h3>
+          <div className="py-5">
+            {editing ? (
+              <>
+                <Label htmlFor="skills">Your skills</Label>
+                <Textarea
+                  id="skills"
+                  value={profile.skills}
+                  onChange={(e) => update("skills", e.target.value)}
+                  placeholder="Python, SQL, Git"
+                />
+                <FieldHint>Separate skills with commas.</FieldHint>
+                {skills.length > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2" aria-label="Preview">
+                    {skills.map((skill) => (
+                      <SkillBadge key={skill} name={skill} />
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : skills.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {skills.map((skill) => (
+                  <SkillBadge key={skill} name={skill} />
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-subtle-foreground">
+                No skills recorded yet.{" "}
+                <Link href="/assessment" className="text-primary underline-offset-4 hover:underline">
+                  Add them in the skill assessment
+                </Link>
+                .
+              </p>
+            )}
+          </div>
+        </section>
+
+        <section className="mt-12" aria-labelledby="education-title">
+          <h3 id="education-title" className="type-eyebrow text-subtle-foreground">Education</h3>
+          <div className="divide-y divide-border">
+            <FieldRow
+              id="education"
               label="Education"
               value={profile.education}
               editing={editing}
               onChange={(v) => update("education", v)}
+              placeholder="For example, B.Tech Computer Science"
             />
-
-            <Field
+            <FieldRow
+              id="institution"
               label="Institution"
               value={profile.institution}
               editing={editing}
               onChange={(v) => update("institution", v)}
-            />
-
-            <Field
-              label="Skills"
-              value={profile.skills}
-              editing={editing}
-              onChange={(v) => update("skills", v)}
-            />
-
-            <Field
-              label="Career Interest"
-              value={profile.career}
-              editing={editing}
-              onChange={(v) => update("career", v)}
+              placeholder="Your college or university"
             />
           </div>
-        </div>
-      </div>
+        </section>
 
-      <div className="rounded-2xl border bg-card p-6 shadow-sm">
-        <h2 className="text-lg font-semibold">SkillBridge Profile</h2>
-
-        <p className="mt-1 text-sm text-muted-foreground">
-          Information used to personalize your SkillBridge experience.
-        </p>
-
-        <div className="mt-5 grid gap-4 sm:grid-cols-3">
-          <div className="rounded-xl border p-4">
-            <p className="text-sm text-muted-foreground">Assessment</p>
-
-            <p className="mt-1 font-semibold">
-              Not completed
-            </p>
+        <section className="mt-12" aria-labelledby="account-title">
+          <h3 id="account-title" className="type-eyebrow text-subtle-foreground">Account</h3>
+          <div className="divide-y divide-border">
+            <FieldRow id="name" label="Full name" value={profile.name} editing={false} />
+            <FieldRow id="email" label="Email" value={profile.email} editing={false} />
           </div>
-
-          <div className="rounded-xl border p-4">
-            <p className="text-sm text-muted-foreground">Skills Added</p>
-
-            <p className="mt-1 font-semibold">
-              {typeof profile.skills === "string"
-                ? profile.skills.split(",").map((skill) => skill.trim()).filter(Boolean).length
-                : 0}{" "}              skills
-            </p>
-          </div>
-
-          <div className="rounded-xl border p-4">
-            <p className="text-sm text-muted-foreground">
-              Career Goal
-            </p>
-
-            <p className="mt-1 font-semibold">
-              {profile.career || "Not set"}
-            </p>
-          </div>
-        </div>
+        </section>
       </div>
     </div>
   )
 }
-
-function Field({
-  label,
-  value,
-  editing,
-  onChange,
-}: {
-  label: string
-  value: string
-  editing: boolean
-  onChange: (value: string) => void
-}) {
-  return (
-    <div>
-      <label className="text-sm font-medium">
-        {label}
-      </label>
-
-      {editing ? (
-        <input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="mt-2 w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none transition focus:ring-2 focus:ring-primary"
-        />
-      ) : (
-        <div className="mt-2 rounded-lg border bg-muted/30 px-3 py-2 text-sm">
-          {value || "Not set"}
-        </div>
-      )}
-    </div>
-  )
-}
-
-
-
-
-
-

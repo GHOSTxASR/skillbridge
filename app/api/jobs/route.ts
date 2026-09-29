@@ -1,5 +1,21 @@
 import { NextResponse } from "next/server"
 import { createSupabaseServerClient } from "@/lib/supabase-server"
+import {
+  DEFAULT_JOB_LOCATION,
+  LOCATION_SCORE,
+  classifyJobLocation,
+  parseJobLocation,
+  sanitizeJobLocation,
+  type LocationMatch,
+} from "@/lib/jobs/location"
+import {
+  arbeitnowCovers,
+  fetchArbeitnow,
+  fetchMuse,
+  fetchRemotive,
+  type SourceJob,
+} from "@/lib/jobs/providers"
+import { applyDemoJobLocation, isDemoJobLocationMode } from "@/lib/jobs/demo-location-adapter" // TEMPORARY DEMO WORKAROUND — REMOVE AFTER SIH DEMO
 
 type Job = {
   id: string
@@ -13,7 +29,10 @@ type Job = {
   tags: string[]
   match: number
   locationScore: number
+  locationMatch: LocationMatch
 }
+
+const MAX_JOBS = 60
 
 function normalize(value: string) {
   return value
@@ -23,94 +42,6 @@ function normalize(value: string) {
     .trim()
 }
 
-function locationScore(location: string, remote: boolean) {
-  const value = normalize(location)
-
-  const kolkata =
-    value.includes("kolkata") ||
-    value.includes("calcutta")
-
-  const westBengal =
-    value.includes("west bengal") ||
-    value.includes("west-bengal")
-
-  const indianLocations = [
-    "india",
-    "indian",
-    "bangalore",
-    "bengaluru",
-    "mumbai",
-    "delhi",
-    "new delhi",
-    "hyderabad",
-    "pune",
-    "chennai",
-    "ahmedabad",
-    "gurgaon",
-    "gurugram",
-    "noida",
-    "jaipur",
-    "chandigarh",
-    "kochi",
-    "coimbatore",
-    "bhubaneswar",
-    "patna",
-    "lucknow",
-    "indore",
-    "nagpur",
-    "surat",
-    "vadodara",
-    "visakhapatnam",
-  ]
-
-  const foreignIndicators = [
-    "usa",
-    "united states",
-    "us only",
-    "uk",
-    "united kingdom",
-    "canada",
-    "australia",
-    "germany",
-    "france",
-    "netherlands",
-    "singapore",
-    "ireland",
-    "europe",
-    "european union",
-    "worldwide",
-    "austria",
-    "switzerland",
-    "belgium",
-    "spain",
-    "italy",
-    "portugal",
-    "denmark",
-    "sweden",
-    "norway",
-    "finland",
-    "poland",
-  ]
-
-  const explicitlyForeign =
-    foreignIndicators.some((country) =>
-      value.includes(country)
-    )
-
-  if (explicitlyForeign) return 30
-  if (kolkata) return 100
-  if (westBengal) return 90
-
-  if (
-    indianLocations.some((place) =>
-      value.includes(place)
-    )
-  ) {
-    return 70
-  }
-
-  return 0
-}
 function calculateMatch(
   title: string,
   description: string,
@@ -154,59 +85,7 @@ function calculateMatch(
   )
 }
 
-async function fetchArbeitnow() {
-  try {
-    const response = await fetch(
-      "https://www.arbeitnow.com/api/job-board-api",
-      {
-        headers: {
-          Accept: "application/json",
-        },
-        next: {
-          revalidate: 900,
-        },
-      }
-    )
-
-    if (!response.ok) return []
-
-    const data = await response.json()
-
-    return Array.isArray(data.data)
-      ? data.data
-      : []
-  } catch {
-    return []
-  }
-}
-
-async function fetchRemotive() {
-  try {
-    const response = await fetch(
-      "https://remotive.com/api/remote-jobs",
-      {
-        headers: {
-          Accept: "application/json",
-        },
-        next: {
-          revalidate: 1800,
-        },
-      }
-    )
-
-    if (!response.ok) return []
-
-    const data = await response.json()
-
-    return Array.isArray(data.jobs)
-      ? data.jobs
-      : []
-  } catch {
-    return []
-  }
-}
-
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const supabase =
       await createSupabaseServerClient()
@@ -263,153 +142,62 @@ export async function GET() {
         .filter(Boolean)
     }
 
-    const [
-      arbeitnowJobs,
-      remotiveJobs,
-    ] = await Promise.all([
-      fetchArbeitnow(),
+    // Where to search: ?location=..., else the default. Anything that is not a plain
+    // place name is ignored rather than sent on to a job source.
+    const requested = new URL(request.url).searchParams.get("location")
+    const target = parseJobLocation(
+      sanitizeJobLocation(requested) ?? DEFAULT_JOB_LOCATION
+    )
+
+    const [museJobs, remotiveJobs, arbeitnowJobs] = await Promise.all([
+      fetchMuse(target, targetRole),
       fetchRemotive(),
+      arbeitnowCovers(target) ? fetchArbeitnow() : Promise.resolve([] as SourceJob[]),
     ])
+
+    const summary: Record<LocationMatch, number> = {
+      city: 0,
+      country: 0,
+      remote: 0,
+      other: 0,
+    }
 
     const jobs: Job[] = []
 
-    for (const job of arbeitnowJobs) {
-      const title = String(
-        job.title ?? ""
-      )
+    for (const job of [...museJobs, ...arbeitnowJobs, ...remotiveJobs]) {
+      if (!job.title || !job.url) continue
 
-      const description = String(
-        job.description ?? ""
-      )
+      const locationMatch = classifyJobLocation(job.location, job.remote, target)
 
-      const tags = Array.isArray(job.tags)
-        ? job.tags.map((tag: unknown) =>
-            String(tag)
-          )
-        : []
-
-      const location = String(
-        job.location ?? "Remote"
-      )
-
-      if (!title) continue
-
-      const localScore =
-        locationScore(
-          location,
-          Boolean(job.remote)
-        )
-
-      // Keep all jobs; locationScore is used for recommendation priority.
-
-      const match =
-        calculateMatch(
-          title,
-          description,
-          tags,
-          targetRole,
-          skills
-        )
+      // Listings somewhere the user did not ask for are left out (and counted).
+      if (locationMatch === "other") {
+        summary.other++
+        continue
+      }
 
       jobs.push({
-        id: `arbeitnow-${
-          job.slug ??
-          job.id ??
-          Math.random()
-        }`,
-        title,
-        company: String(
-          job.company_name ??
-            "Unknown Company"
-        ),
-        location,
-        remote: Boolean(job.remote),
-        description,
-        url: String(job.url ?? ""),
-        source: "Arbeitnow",
-        tags,
-        match,
-        locationScore: localScore,
-      })
-    }
-
-    for (const job of remotiveJobs) {
-      const title = String(
-        job.title ?? ""
-      )
-
-      const description = String(
-        job.description ?? ""
-      )
-
-      const tags = Array.isArray(job.tags)
-        ? job.tags.map((tag: unknown) =>
-            String(tag)
-          )
-        : []
-
-      const location = String(
-        job.candidate_required_location ??
-          "Remote"
-      )
-
-      if (!title) continue
-
-      const localScore =
-        locationScore(
-          location,
-          true
-        )
-
-      // Keep all jobs; locationScore is used for recommendation priority.
-
-      const match =
-        calculateMatch(
-          title,
-          description,
-          tags,
-          targetRole,
-          skills
-        )
-
-      jobs.push({
-        id: `remotive-${
-          job.id ??
-          Math.random()
-        }`,
-        title,
-        company: String(
-          job.company_name ??
-            "Unknown Company"
-        ),
+        ...job,
         location:
-          location.toLowerCase() ===
-          "india"
+          job.source === "Remotive" && job.location.toLowerCase() === "india"
             ? "India · Remote"
-            : location,
-        remote: true,
-        description,
-        url: String(job.url ?? ""),
-        source: "Remotive",
-        tags,
-        match,
-        locationScore: localScore,
+            : job.location,
+        match: calculateMatch(job.title, job.description, job.tags, targetRole, skills),
+        locationScore: LOCATION_SCORE[locationMatch],
+        locationMatch,
       })
     }
 
     const uniqueJobs =
       Array.from(
         new Map(
-          jobs
-            .filter(
-              (job) => job.url
-            )
-            .map((job) => [
-              job.url,
-              job,
-            ])
+          jobs.map((job) => [
+            job.url,
+            job,
+          ])
         ).values()
       )
+
+    for (const job of uniqueJobs) summary[job.locationMatch]++
 
     uniqueJobs.sort(
       (a, b) => {
@@ -425,19 +213,33 @@ export async function GET() {
       }
     )
 
+    let ranked = uniqueJobs.slice(0, MAX_JOBS)
+
+    if (isDemoJobLocationMode()) ranked = applyDemoJobLocation(ranked, target) // TEMPORARY DEMO WORKAROUND — REMOVE AFTER SIH DEMO
+
     return NextResponse.json({
       userId: user.id,
       targetRole,
-      preferredLocation:
-        "Kolkata, West Bengal, India",
+      preferredLocation: target.label,
+      location: {
+        label: target.label,
+        remoteOnly: target.remoteOnly,
+        // Listings per fit, from the sources (before any demo relabelling);
+        // `other` were elsewhere and left out.
+        matches: summary,
+      },
       skills,
-      jobs:
-        uniqueJobs.slice(0, 60),
+      jobs: ranked,
       total: uniqueJobs.length,
+      sources: [
+        "The Muse",
+        "Remotive",
+        ...(arbeitnowCovers(target) ? ["Arbeitnow"] : []),
+      ],
       generatedAt:
         new Date().toISOString(),
       freshness:
-        "Jobs are fetched dynamically and prioritized for Kolkata, West Bengal and India.",
+        `Live listings for ${target.label}: that city first, then elsewhere in the country, then remote roles open to it.`,
     })
   } catch (error) {
     console.error(

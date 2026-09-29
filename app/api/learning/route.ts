@@ -1,6 +1,21 @@
+import { createHash } from "node:crypto"
 import { NextResponse } from "next/server"
 import { createSupabaseServerClient } from "@/lib/supabase-server"
 import { groqJSON } from "@/lib/ai/groq"
+import { shareInFlight } from "@/lib/ai/in-flight"
+import { admitGeneration, rateLimitedResponse } from "@/lib/ai/rate-limit"
+import { loadSkillCatalog, resolveSkill } from "@/lib/skills/catalog"
+import { recordRoadmapVersion } from "@/lib/skills/roadmap-versions"
+
+// Part of every stored roadmap's input hash. Bump it whenever the prompt, the Groq
+// options or the roadmap normalization changes, so older stored roadmaps are regenerated.
+const LEARNING_PROMPT_VERSION = "v1"
+
+// Must resolve the model exactly like getModel() in lib/ai/groq.ts (not exported), so
+// the model recorded with a stored roadmap is the one that generated it.
+const DEFAULT_GROQ_MODEL = "llama-3.1-8b"
+
+const MAX_ROADMAP_ITEMS = 10
 
 type RoadmapItem = {
   order: number
@@ -26,6 +41,38 @@ type Resource = {
   free: boolean
 }
 
+type LearningResult = {
+  roadmap: RoadmapItem[]
+  aiSummary: string | null
+  generatedAt: string
+}
+
+// retryAfterSeconds is set only when the per-user limit refused the generation.
+type RoadmapGeneration =
+  | ({ ok: true } & LearningResult)
+  | { ok: false; retryAfterSeconds?: number }
+
+function isPlainObject(
+  value: unknown
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  )
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== ""
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item) => typeof item === "string")
+  )
+}
+
 function clean(value: unknown): string {
   if (typeof value !== "string") return ""
 
@@ -35,9 +82,14 @@ function clean(value: unknown): string {
 }
 
 function normalizeSkills(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
+  // profiles.skills is an array (assessment page) or a comma-separated string
+  // (account page); both go through the same normalization.
+  const items =
+    typeof value === "string" ? value.split(",") : value
 
-  return value
+  if (!Array.isArray(items)) return []
+
+  return items
     .map(clean)
     .filter(Boolean)
     .filter((skill, index, array) => {
@@ -47,6 +99,188 @@ function normalizeSkills(value: unknown): string[] {
         ) === index
       )
     })
+}
+
+function currentModel(): string {
+  return process.env.GROQ_MODEL?.trim() || DEFAULT_GROQ_MODEL
+}
+
+// Case and spacing do not change what a roadmap is for, so they do not change the key.
+function keyText(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase()
+}
+
+// Deterministic key for "same learner inputs, same model, same prompt". The user id is
+// not part of it: each user has one row, keyed by user_id.
+function learningInputHash(input: {
+  targetRole: string
+  experienceLevel: string
+  skills: string[]
+  model: string
+}): string {
+  const skills = Array.from(
+    new Set(input.skills.map(keyText))
+  ).sort()
+
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        targetRole: keyText(input.targetRole),
+        experienceLevel: keyText(input.experienceLevel),
+        skills,
+        model: input.model,
+        promptVersion: LEARNING_PROMPT_VERSION,
+      })
+    )
+    .digest("hex")
+}
+
+function normalizeRoadmap(items: unknown[]): RoadmapItem[] {
+  return items
+    .filter(isPlainObject)
+    .map((item, index) => ({
+      order: index + 1,
+      phase:
+        typeof item.phase === "string" && item.phase.trim()
+          ? item.phase.trim()
+          : `Phase ${Math.floor(index / 2) + 1}`,
+      skill: clean(item.skill),
+      reason:
+        typeof item.reason === "string" && item.reason.trim()
+          ? item.reason.trim()
+          : "Important for the target role.",
+      prerequisite:
+        typeof item.prerequisite === "string" &&
+        item.prerequisite.trim()
+          ? item.prerequisite.trim()
+          : "None",
+      estimatedHours:
+        typeof item.estimatedHours === "number" &&
+        Number.isFinite(item.estimatedHours) &&
+        item.estimatedHours > 0
+          ? Math.round(item.estimatedHours)
+          : 25,
+      topics: Array.isArray(item.topics)
+        ? item.topics.map(clean).filter(Boolean)
+        : [],
+      practice: Array.isArray(item.practice)
+        ? item.practice.map(clean).filter(Boolean)
+        : [],
+      project:
+        typeof item.project === "string" && item.project.trim()
+          ? item.project.trim()
+          : "Build a practical project.",
+      checkpoint:
+        typeof item.checkpoint === "string" &&
+        item.checkpoint.trim()
+          ? item.checkpoint.trim()
+          : "Complete the practical project.",
+    }))
+    .filter((item) => item.skill)
+    .slice(0, MAX_ROADMAP_ITEMS)
+}
+
+// groqJSON returns its fallback argument (null here) when every key fails or the reply
+// is not JSON, so only a parsed object with at least one usable item is an AI roadmap.
+function readAiRoadmap(
+  ai: unknown
+): Omit<LearningResult, "generatedAt"> | null {
+  if (!isPlainObject(ai) || !Array.isArray(ai.roadmap)) return null
+
+  const roadmap = normalizeRoadmap(ai.roadmap)
+
+  if (roadmap.length === 0) return null
+
+  return {
+    roadmap,
+    aiSummary: isNonEmptyString(ai.analysis)
+      ? ai.analysis.trim()
+      : null,
+  }
+}
+
+// Exactly the item shape normalizeRoadmap() writes; anything else is not reused.
+function isStoredRoadmapItem(value: unknown): boolean {
+  return (
+    isPlainObject(value) &&
+    typeof value.order === "number" &&
+    Number.isInteger(value.order) &&
+    value.order > 0 &&
+    isNonEmptyString(value.phase) &&
+    typeof value.skill === "string" &&
+    value.skill !== "" &&
+    clean(value.skill) === value.skill &&
+    isNonEmptyString(value.reason) &&
+    isNonEmptyString(value.prerequisite) &&
+    typeof value.estimatedHours === "number" &&
+    Number.isInteger(value.estimatedHours) &&
+    value.estimatedHours >= 0 &&
+    isStringArray(value.topics) &&
+    isStringArray(value.practice) &&
+    isNonEmptyString(value.project) &&
+    isNonEmptyString(value.checkpoint)
+  )
+}
+
+// A stored roadmap is reused only for the same inputs, model and prompt version, and
+// only if it is still structurally what this route writes.
+function usableStoredRoadmap(
+  row: unknown,
+  inputHash: string,
+  model: string
+): LearningResult | null {
+  if (
+    !isPlainObject(row) ||
+    row.input_hash !== inputHash ||
+    row.model !== model ||
+    row.prompt_version !== LEARNING_PROMPT_VERSION
+  ) {
+    return null
+  }
+
+  const roadmap = row.roadmap
+
+  if (
+    !Array.isArray(roadmap) ||
+    roadmap.length === 0 ||
+    roadmap.length > MAX_ROADMAP_ITEMS ||
+    !roadmap.every(isStoredRoadmapItem)
+  ) {
+    return null
+  }
+
+  if (row.ai_summary !== null && typeof row.ai_summary !== "string") {
+    return null
+  }
+
+  const generatedAt =
+    typeof row.generated_at === "string"
+      ? new Date(row.generated_at)
+      : null
+
+  if (!generatedAt || Number.isNaN(generatedAt.getTime())) {
+    return null
+  }
+
+  return {
+    // jsonb reorders keys and could hold extra ones: rebuild each item field by field.
+    roadmap: (roadmap as RoadmapItem[]).map((item) => ({
+      order: item.order,
+      phase: item.phase,
+      skill: item.skill,
+      reason: item.reason,
+      prerequisite: item.prerequisite,
+      estimatedHours: item.estimatedHours,
+      topics: item.topics,
+      practice: item.practice,
+      project: item.project,
+      checkpoint: item.checkpoint,
+    })),
+    aiSummary: isNonEmptyString(row.ai_summary)
+      ? row.ai_summary.trim()
+      : null,
+    generatedAt: generatedAt.toISOString(),
+  }
 }
 
 function documentation(skill: string): string | null {
@@ -137,7 +371,80 @@ function resourcesForSkill(skill: string): Resource[] {
   return result
 }
 
-export async function GET() {
+// Records the trusted version of a freshly generated roadmap: each step's skill resolved
+// with the one catalog resolver (unmatched and compound skills stay null, never guessed).
+// Best effort: the roadmap is returned and cached whether or not this succeeds.
+async function recordTrustedVersion(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  userId: string,
+  inputHash: string,
+  model: string,
+  generatedAt: string,
+  roadmap: RoadmapItem[]
+) {
+  try {
+    const catalog = await loadSkillCatalog(supabase)
+    if (!catalog) {
+      console.error("Roadmap version not recorded: skill catalog unavailable")
+      return
+    }
+    await recordRoadmapVersion({
+      userId,
+      inputHash,
+      model,
+      promptVersion: LEARNING_PROMPT_VERSION,
+      generatedAt,
+      steps: roadmap.map((item) => ({
+        order: item.order,
+        phase: item.phase || null,
+        skill: item.skill,
+        skillId: resolveSkill(catalog, item.skill).skill?.id ?? null,
+        reason: item.reason || null,
+      })),
+    })
+  } catch {
+    console.error("Roadmap version not recorded: unexpected error")
+  }
+}
+
+// Resources are derived from the skill names, so they are rebuilt here, never stored.
+function learningResponse(input: {
+  targetRole: string
+  currentSkills: string[]
+  roadmap: RoadmapItem[]
+  aiSummary: string
+  generatedAt: string
+  aiAvailable: boolean
+}) {
+  return NextResponse.json({
+    targetRole: input.targetRole,
+    currentSkills: input.currentSkills,
+    aiSummary: input.aiSummary,
+    recommendedSkills: input.roadmap.map(
+      (item) => item.skill
+    ),
+    skills: input.roadmap,
+    resources: input.roadmap.flatMap(
+      (item) => resourcesForSkill(item.skill)
+    ),
+    totalHours: input.roadmap.reduce(
+      (sum, item) => sum + item.estimatedHours,
+      0
+    ),
+    totalSkills: input.roadmap.length,
+    sources: {
+      github: true,
+      youtube: true,
+      documentation: true,
+    },
+    generatedAt: input.generatedAt,
+    aiAvailable: input.aiAvailable,
+  })
+}
+
+// GET /api/learning reuses the user's stored roadmap while their inputs are unchanged;
+// GET /api/learning?refresh=1 always asks Groq for a new one.
+export async function GET(request: Request) {
   try {
     const supabase = await createSupabaseServerClient()
 
@@ -152,6 +459,9 @@ export async function GET() {
       )
     }
 
+    const refresh =
+      new URL(request.url).searchParams.get("refresh") === "1"
+
     const { data: profile } = await supabase
       .from("profiles")
       .select("target_role, skills, experience_level")
@@ -165,6 +475,53 @@ export async function GET() {
         : "Software Engineer"
 
     const currentSkills = normalizeSkills(profile?.skills)
+
+    const experienceLevel =
+      typeof profile?.experience_level === "string" &&
+      profile.experience_level.trim()
+        ? profile.experience_level.trim()
+        : "Not specified"
+
+    const model = currentModel()
+
+    const inputHash = learningInputHash({
+      targetRole,
+      experienceLevel,
+      skills: currentSkills,
+      model,
+    })
+
+    const defaultAiSummary =
+      `AI recommendations for your ${targetRole} career path.`
+
+    // RLS limits this to the signed-in user's own row.
+    const { data: storedRow, error: readError } = await supabase
+      .from("learning_roadmaps")
+      .select(
+        "input_hash, roadmap, ai_summary, model, generated_at, prompt_version"
+      )
+      .eq("user_id", user.id)
+      .maybeSingle()
+
+    if (readError) {
+      console.error(
+        "Learning roadmap cache read failed:",
+        readError.message
+      )
+    }
+
+    const stored = usableStoredRoadmap(storedRow, inputHash, model)
+
+    if (stored && !refresh) {
+      return learningResponse({
+        targetRole,
+        currentSkills,
+        roadmap: stored.roadmap,
+        aiSummary: stored.aiSummary ?? defaultAiSummary,
+        generatedAt: stored.generatedAt,
+        aiAvailable: true,
+      })
+    }
 
     const fallbackItems: RoadmapItem[] = [
       {
@@ -240,11 +597,21 @@ export async function GET() {
       },
     ]
 
-    const ai = await groqJSON<{
-      analysis?: string
-      roadmap?: RoadmapItem[]
-    }>(
-      `You are SkillBridge's AI Learning Advisor.
+    // Only a cache miss or ?refresh=1 gets here. Identical concurrent requests (same user,
+    // same inputs) share one admission, one Groq call and one write.
+    const generation = await shareInFlight(
+      `learning:${user.id}:${inputHash}`,
+      async (): Promise<RoadmapGeneration> => {
+        const admission = await admitGeneration(supabase, "learning")
+
+        if (!admission.allowed) {
+          return admission.reason === "rate_limited"
+            ? { ok: false, retryAfterSeconds: admission.retryAfterSeconds }
+            : { ok: false }
+        }
+
+        const ai = await groqJSON<unknown>(
+          `You are SkillBridge's AI Learning Advisor.
 
 Analyze the learner for their target role and create a realistic learning roadmap.
 
@@ -259,12 +626,7 @@ ${
 }
 
 Experience level:
-${
-  typeof profile?.experience_level === "string" &&
-  profile.experience_level.trim()
-    ? profile.experience_level
-    : "Not specified"
-}
+${experienceLevel}
 
 Your job:
 1. Analyze what the learner needs for the target role.
@@ -295,92 +657,89 @@ analysis
 The analysis should be a concise explanation of what the learner should focus on and why.
 
 Return ONLY JSON.`,
-      `Analyze this learner and build the best learning roadmap for ${targetRole}.`,
-      {
-        analysis:
-          `For the ${targetRole} role, focus on the most important missing skills and learn them in prerequisite order.`,
-        roadmap: fallbackItems,
+          `Analyze this learner and build the best learning roadmap for ${targetRole}.`,
+          null
+        )
+
+        const generated = readAiRoadmap(ai)
+
+        if (!generated) return { ok: false }
+
+        const generatedAt = new Date().toISOString()
+
+        // learning_roadmaps.user_id references profiles(id), so without a profile row
+        // the write could only fail. A failed write still returns the new roadmap.
+        if (profile) {
+          // The immutable, server-written copy that roadmap learning evidence is built from.
+          // It never blocks or changes the roadmap; learning_roadmaps below stays the
+          // display cache.
+          await recordTrustedVersion(supabase, user.id, inputHash, model, generatedAt, generated.roadmap)
+
+          const { error: writeError } = await supabase
+            .from("learning_roadmaps")
+            .upsert(
+              {
+                user_id: user.id,
+                input_hash: inputHash,
+                roadmap: generated.roadmap,
+                ai_summary: generated.aiSummary,
+                model,
+                generated_at: generatedAt,
+                prompt_version: LEARNING_PROMPT_VERSION,
+              },
+              { onConflict: "user_id" }
+            )
+
+          if (writeError) {
+            console.error(
+              "Learning roadmap cache write failed:",
+              writeError.message
+            )
+          }
+        }
+
+        return { ok: true, ...generated, generatedAt }
       }
     )
 
-    const roadmap =
-      Array.isArray(ai?.roadmap) && ai.roadmap.length > 0
-        ? ai.roadmap
-        : fallbackItems
+    if (generation.ok) {
+      return learningResponse({
+        targetRole,
+        currentSkills,
+        roadmap: generation.roadmap,
+        aiSummary: generation.aiSummary ?? defaultAiSummary,
+        generatedAt: generation.generatedAt,
+        aiAvailable: true,
+      })
+    }
 
-    const normalizedRoadmap: RoadmapItem[] = roadmap
-      .map((item, index) => ({
-        order: index + 1,
-        phase:
-          typeof item.phase === "string" && item.phase.trim()
-            ? item.phase.trim()
-            : `Phase ${Math.floor(index / 2) + 1}`,
-        skill: clean(item.skill),
-        reason:
-          typeof item.reason === "string" && item.reason.trim()
-            ? item.reason.trim()
-            : "Important for the target role.",
-        prerequisite:
-          typeof item.prerequisite === "string" &&
-          item.prerequisite.trim()
-            ? item.prerequisite.trim()
-            : "None",
-        estimatedHours:
-          typeof item.estimatedHours === "number" &&
-          item.estimatedHours > 0
-            ? Math.round(item.estimatedHours)
-            : 25,
-        topics: Array.isArray(item.topics)
-          ? item.topics.map(clean).filter(Boolean)
-          : [],
-        practice: Array.isArray(item.practice)
-          ? item.practice.map(clean).filter(Boolean)
-          : [],
-        project:
-          typeof item.project === "string" && item.project.trim()
-            ? item.project.trim()
-            : "Build a practical project.",
-        checkpoint:
-          typeof item.checkpoint === "string" &&
-          item.checkpoint.trim()
-            ? item.checkpoint.trim()
-            : "Complete the practical project.",
-      }))
-      .filter((item) => item.skill)
-      .slice(0, 10)
+    // Over the per-user limit: refused before any Groq call, even for a refresh that
+    // has a stored roadmap to fall back on.
+    if (generation.retryAfterSeconds !== undefined) {
+      return rateLimitedResponse(generation.retryAfterSeconds)
+    }
 
-    const resources = normalizedRoadmap.flatMap(
-      (item) => resourcesForSkill(item.skill)
-    )
+    // No AI roadmap. Nothing is written, so a stored AI roadmap is never replaced by the
+    // fallback; a failed refresh keeps serving the stored roadmap if it still matches.
+    if (stored) {
+      return learningResponse({
+        targetRole,
+        currentSkills,
+        roadmap: stored.roadmap,
+        aiSummary: stored.aiSummary ?? defaultAiSummary,
+        generatedAt: stored.generatedAt,
+        aiAvailable: true,
+      })
+    }
 
-    const totalHours = normalizedRoadmap.reduce(
-      (sum, item) => sum + item.estimatedHours,
-      0
-    )
-
-    return NextResponse.json({
+    return learningResponse({
       targetRole,
       currentSkills,
+      roadmap: normalizeRoadmap(fallbackItems),
       aiSummary:
-        typeof ai?.analysis === "string" && ai.analysis.trim()
-          ? ai.analysis.trim()
-          : `AI recommendations for your ${targetRole} career path.`,
-      recommendedSkills: normalizedRoadmap.map(
-        (item) => item.skill
-      ),
-      skills: normalizedRoadmap,
-      resources,
-      totalHours,
-      totalSkills: normalizedRoadmap.length,
-      sources: {
-        github: true,
-        youtube: true,
-        documentation: true,
-      },
+        `For the ${targetRole} role, focus on the most important missing skills and learn them in prerequisite order.`,
       generatedAt: new Date().toISOString(),
-      aiAvailable:
-        Array.isArray(ai?.roadmap) &&
-        ai.roadmap.length > 0,
+      aiAvailable: false,
     })
   } catch (error) {
     console.error("Learning roadmap error:", error)
