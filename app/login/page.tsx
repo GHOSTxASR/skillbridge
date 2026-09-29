@@ -15,11 +15,13 @@ import {
 import { supabase } from "@/lib/supabase-browser"
 import {
   CODE_MAX_LENGTH,
+  DEMO_NOTICE,
   EXISTS_MESSAGE,
   PENDING_VERIFICATION_KEY,
   RESEND_COOLDOWN_SECONDS,
   afterVerification,
   authErrorMessage,
+  demoSignupOutcome,
   isCodeComplete,
   normalizeCode,
   signupOutcome,
@@ -58,6 +60,10 @@ export default function LoginPage() {
   const [resendIn, setResendIn] = useState(0)
   // Synchronous guard: a second submit before the first answer is ignored.
   const busyRef = useRef(false)
+  // TEMPORARY SIH demo mode (SKILLBRIDGE_DEMO_AUTH on the server): sign-up skips the email
+  // code. Asked once per visit; any doubt means the normal email-code sign-up.
+  const [demoAuth, setDemoAuth] = useState(false)
+  const demoCheck = useRef<Promise<boolean> | null>(null)
 
   function showMessage(text: string, tone: "error" | "info" = "error") {
     setMessageTone(tone)
@@ -74,6 +80,12 @@ export default function LoginPage() {
     } catch {
       // Storage unavailable: start from sign-in.
     }
+
+    demoCheck.current = fetch("/api/auth/demo-signup", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => body?.enabled === true)
+      .catch(() => false)
+    demoCheck.current.then(setDemoAuth)
 
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (user) {
@@ -136,6 +148,11 @@ export default function LoginPage() {
     setExistingEmail(null)
     showMessage("")
 
+    if (await (demoCheck.current ?? Promise.resolve(false))) {
+      const leaving = await demoSignup(address)
+      if (leaving !== null) return leaving
+    }
+
     const { data, error } = await supabase.auth.signUp({
       email: address,
       password,
@@ -168,6 +185,55 @@ export default function LoginPage() {
 
     startVerification(address, "We sent a verification code to your email.", RESEND_COOLDOWN_SECONDS)
     return false
+  }
+
+  // TEMPORARY SIH demo mode: the server creates the account without email verification
+  // (app/api/auth/demo-signup), then the normal password sign-in starts the session and the
+  // normal onboarding follows. Returns null when the server says demo mode is off, so the
+  // email-code sign-up runs instead.
+  async function demoSignup(address: string): Promise<boolean | null> {
+    let status: number | null = null
+    let body: unknown = null
+    try {
+      const response = await fetch("/api/auth/demo-signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ email: address, password, name: name.trim() }),
+      })
+      status = response.status
+      body = await response.json().catch(() => null)
+    } catch {
+      status = null
+    }
+
+    const outcome = demoSignupOutcome(status, body)
+    if (outcome.kind === "disabled") {
+      setDemoAuth(false)
+      demoCheck.current = Promise.resolve(false)
+      return null
+    }
+    if (outcome.kind === "exists") {
+      setExistingEmail(address)
+      showMessage(EXISTS_MESSAGE)
+      return false
+    }
+    if (outcome.kind === "error") {
+      showMessage(outcome.message)
+      return false
+    }
+
+    const { error } = await supabase.auth.signInWithPassword({ email: address, password })
+    if (error) {
+      setIsSignup(false)
+      setPassword("")
+      showMessage("Your account was created. Sign in to continue.", "info")
+      return false
+    }
+
+    localStorage.setItem("skillbridge_signup_name", name.trim())
+    window.location.replace("/setup-profile")
+    return true
   }
 
   async function verifyEmail(e: FormEvent): Promise<boolean> {
@@ -459,6 +525,8 @@ export default function LoginPage() {
                   </p>
 
                   <form onSubmit={handleSubmit} className="mt-7 space-y-5">
+                    {isSignup && demoAuth && <Notice tone="warning">{DEMO_NOTICE}</Notice>}
+
                     {isSignup && (
                       <div>
                         <Label htmlFor="name">Full name</Label>

@@ -92,6 +92,46 @@ export function signupOutcome(data: SignupData, error: AuthErrorLike): SignupOut
   return { kind: "error", message: GENERIC_MESSAGE }
 }
 
+// ---- TEMPORARY SIH demo sign-up (SKILLBRIDGE_DEMO_AUTH=true; see lib/auth/demo-signup.ts) ----
+
+export const DEMO_NOTICE = "SIH demo: accounts are created without email verification."
+
+type Parsed<T> = { ok: true; value: T } | { ok: false; error: string }
+const DEMO_KEYS = ["email", "password", "name"]
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+// POST /api/auth/demo-signup body. Nothing else is accepted: no metadata, roles or ids.
+export function parseDemoSignup(body: unknown): Parsed<{ email: string; password: string; name: string }> {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return { ok: false, error: "Request body must be a JSON object" }
+  const record = body as Record<string, unknown>
+  const extra = Object.keys(record).filter((key) => !DEMO_KEYS.includes(key))
+  if (extra.length) return { ok: false, error: `unexpected field(s): ${extra.sort().join(", ")}` }
+
+  const { email, password, name } = record
+  if (typeof email !== "string" || email.trim().length > 254 || !EMAIL.test(email.trim())) return { ok: false, error: "Enter a valid email address." }
+  if (typeof password !== "string" || password.length < 6 || password.length > 72) return { ok: false, error: "Use a password of 6 to 72 characters." }
+  if (typeof name !== "string" || !name.trim() || name.trim().length > 100) return { ok: false, error: "Please enter your name (up to 100 characters)." }
+  return { ok: true, value: { email: email.trim().toLowerCase(), password, name: name.trim() } }
+}
+
+export type DemoSignupOutcome =
+  | { kind: "created" }
+  | { kind: "exists" }
+  // Demo mode is off on the server: use the normal email-code sign-up.
+  | { kind: "disabled" }
+  | { kind: "error"; message: string }
+
+// Maps a POST /api/auth/demo-signup answer (status null: no response) for the login page.
+export function demoSignupOutcome(status: number | null, body: unknown): DemoSignupOutcome {
+  const data = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {}
+  if (status === 201 && data.created === true) return { kind: "created" }
+  if (status === 409 && data.code === "exists") return { kind: "exists" }
+  if (status === 404) return { kind: "disabled" }
+  if (status === null) return { kind: "error", message: "Couldn't reach SkillBridge. Check your connection, or try again in a minute." }
+  if ((status === 400 || status === 429) && typeof data.error === "string" && data.error) return { kind: "error", message: data.error }
+  return { kind: "error", message: GENERIC_MESSAGE }
+}
+
 // Where a user goes right after verifying: onboarding unless a profile already exists. A
 // failed lookup is not proof that the profile is missing, so it goes to the dashboard,
 // whose guard checks again.

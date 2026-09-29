@@ -6,8 +6,9 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 // cache, public.learning_roadmaps, is written with the user's own session and is never
 // trusted as evidence.
 //
-// This is the ONLY module that reads SUPABASE_SECRET_KEY, and app/api/learning/route.ts is
-// its only importer. The privileged client never leaves this file; the only thing it does
+// Apart from the temporary SIH demo sign-up (lib/auth/demo-signup.ts, active only when
+// SKILLBRIDGE_DEMO_AUTH=true), this is the only module that reads SUPABASE_SECRET_KEY, and
+// app/api/learning/route.ts is its only importer. The privileged client never leaves this file; the only thing it does
 // is call create_learning_roadmap_version(), which the database lets service_role run and
 // nobody else. Failures are logged as a short code only: never the key, the request or the
 // raw error. When the key is not configured nothing is recorded and roadmap evidence stays

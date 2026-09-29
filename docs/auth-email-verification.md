@@ -48,6 +48,53 @@ deployed site, because other Supabase emails use them.
 | Verified, but closed the tab before onboarding | On the next visit or sign-in, the app shell sees no profile and sends the user to `/setup-profile`. |
 | Already signed in and opens `/login` | Redirected to `/`. |
 
+## Temporary SIH demo mode (`SKILLBRIDGE_DEMO_AUTH`)
+
+For the SIH judging demo, new accounts can skip the email code. Supabase's settings do not
+change: "Confirm email" stays on, and nothing in the code changes the dashboard.
+
+**How it works**
+
+- The login page asks `GET /api/auth/demo-signup` whether demo mode is on. With it on, the
+  sign-up form says "SIH demo: accounts are created without email verification."
+- Sign-up posts `{ email, password, name }` to `POST /api/auth/demo-signup`. The server
+  (`lib/auth/demo-signup.ts`, server-only) creates the account with the Supabase admin API.
+- The page then signs in with the normal password sign-in, and the normal `/setup-profile`
+  onboarding follows. Sessions, the guard, profile creation and sign-out are unchanged.
+- **Existing emails:** `createUser` refuses an email that already has an account. No
+  duplicate is created and no password is overwritten, and the page shows the usual
+  "account already exists" message.
+- **Abuse limit:** account creation is limited to 10 per client IP and 200 in total per
+  10 minutes, per server instance. This is best effort.
+- **Flag off:** `POST` answers 404 and `GET` says disabled, so the page uses the email-code
+  flow above.
+
+**Not identity verification.** Supabase only lets confirmed accounts sign in, so demo
+accounts are created confirmed (`email_confirmed_at` is set). That does **not** mean the
+email was verified. Every demo account also carries `app_metadata.skillbridge_demo_auth =
+true`, which only the server can set. Use it to find those accounts later. Nothing in
+SkillBridge treats demo accounts as verified.
+
+**Enable (demo deployment only)**
+
+1. Set `SUPABASE_SECRET_KEY` (already required for roadmap evidence) and
+   `SKILLBRIDGE_DEMO_AUTH=true` in `.env.local` or the Vercel project's environment variables.
+2. Restart the dev server, or redeploy on Vercel. Server environment variables are read at
+   runtime; a Vercel change needs a new deployment to take effect.
+
+**Revert to email verification**
+
+1. Remove `SKILLBRIDGE_DEMO_AUTH` (or set it to anything other than `true`) wherever it was
+   set, then restart or redeploy. Sign-up immediately goes back to the email code; no code
+   change is needed.
+2. Optional clean-up: in the Supabase SQL editor, list the accounts created in demo mode:
+   `select id, email, created_at from auth.users where raw_app_meta_data ->> 'skillbridge_demo_auth' = 'true';`
+   Then decide whether to keep, re-verify or delete them.
+3. To remove the feature completely, delete `app/api/auth/demo-signup/route.ts` and
+   `lib/auth/demo-signup.ts`. Also delete the `demoSignup` branch, the `demoAuth`/`demoCheck`
+   state and the demo notice in `app/login/page.tsx`, the demo helpers in `lib/auth/flow.ts`,
+   and the `SKILLBRIDGE_DEMO_AUTH` line in `.env.example`.
+
 ## Onboarding guard
 
 `components/auth/auth-guard.tsx` wraps every page in the app shell. Page content renders only

@@ -153,8 +153,10 @@ Migration `20260928180000_roadmap_learning_evidence.sql` adds the evidence sourc
   - `service_role` only. It validates everything (steps numbered 1..N, sizes, skill ids)
     and writes the header and all steps atomically, under a per-user lock.
   - `/api/learning` calls it after each successful AI generation, through
-    `lib/skills/roadmap-versions.ts`. That is the only module that reads `SUPABASE_SECRET_KEY`
-    (server-only, never `NEXT_PUBLIC_`), and `/api/learning` is its only importer.
+    `lib/skills/roadmap-versions.ts`. Apart from the temporary SIH demo sign-up
+    (`lib/auth/demo-signup.ts`, active only when `SKILLBRIDGE_DEMO_AUTH=true`), that is the only
+    module that reads `SUPABASE_SECRET_KEY` (server-only, never `NEXT_PUBLIC_`), and
+    `/api/learning` is its only importer.
   - Without the key the roadmap works exactly as before, and roadmap evidence is
     unavailable.
 - **`complete_roadmap_learning_step(version_id, step_order)`.**
